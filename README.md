@@ -1,41 +1,58 @@
-# Bird Detection using Custom CNN
+# Bird Detection
 
-A deep learning project that classifies bird species from images using a custom Convolutional Neural Network (CNN) built with PyTorch.
+A deep learning project that **detects** birds in images and videos (bounding boxes + confidence) using **YOLOv8-nano**, fine-tuned on Google Colab (T4 GPU) and run locally.
+
+## Demo
+
+<video src="bird.mp4" controls width="640"></video>
+
+> **Note**: GitHub only renders videos under 100MB. If this shows "video too large", compress `bird.mp4` (e.g. `ffmpeg -i bird.mp4 -vcodec libx264 -crf 28 -preset fast bird_small.mp4`) and rename it to `bird.mp4`.
 
 ---
 
 ## Table of Contents
 1. [Project Overview](#project-overview)
 2. [Project Folder Structure](#project-folder-structure)
-3. [Architecture](#architecture)
-4. [Dataset Structure](#dataset-structure)
-5. [Installation](#installation)
-6. [Training on Kaggle](#training-on-kaggle)
+3. [Dataset Structure](#dataset-structure)
+4. [Installation](#installation)
+5. [Training on Colab](#training-on-colab)
+6. [Inference](#inference)
 7. [Files Description](#files-description)
-8. [Hyperparameters](#hyperparameters)
+8. [Models Used](#models-used)
 9. [Tips for Better Accuracy](#tips)
+10. [Quick Start Commands](#quick-start-commands)
 
 ---
 
 ## Project Overview
 
-This project uses **Supervised Learning** with a **CNN (Convolutional Neural Network)** to classify bird species from images. The model takes a 224x224 RGB image as input and outputs the predicted bird species class.
+This project uses **Supervised Learning** with **YOLOv8-nano** (a lightweight, fast object detector) to **detect** birds.
 
-### Why CNN for Bird Classification?
-- CNNs automatically learn spatial features (edges, textures, shapes) from images
-- Convolutional layers detect local patterns like feather textures, beak shapes, and color patterns
-- Pooling layers reduce spatial dimensions while keeping important features
-- This is a **Classification** task (predicting discrete species), NOT regression
+### Classification vs Detection
+| Task | Question | Output |
+|------|----------|--------|
+| **Classification** | "What is in this image?" | Class label (e.g., "Bird") |
+| **Detection** (this project) | "Where is the bird?" | Bounding boxes + confidence |
+
+The model draws a bounding box around every detected bird with a confidence score.
+
+### Why YOLOv8-nano?
+| Approach | Problem |
+|----------|---------|
+| Custom CNN | Detected birds but boxes were imprecise |
+| Teachable Machine (Keras) | Fast but classification only (no boxes) |
+| **YOLOv8-nano** (this project) | Fast **AND** accurate bounding boxes (best of both) |
 
 ### Key Concepts
 | Term | Meaning |
 |------|---------|
-| **Supervised Learning** | Training with labeled data (image + species name) |
-| **Classification** | Predicting which category/species an image belongs to |
-| **CNN** | Neural network with convolutional layers for image processing |
+| **Bounding Box** | Rectangle around the detected bird (x1, y1, x2, y2) |
+| **Confidence** | Probability (0-1) that a box contains a bird |
+| **IoU** | Intersection over Union - measures box overlap accuracy |
 | **Epoch** | One complete pass through the entire training dataset |
 | **Batch** | Number of images processed at once before updating weights |
-| **Learning Rate** | How big of a step the optimizer takes during training |
+| **mAP** | Mean Average Precision - standard detection accuracy metric |
+| **imgsz** | Inference resolution (640 = accurate, 320 = fast) |
 
 ---
 
@@ -44,304 +61,198 @@ This project uses **Supervised Learning** with a **CNN (Convolutional Neural Net
 ```
 D:\samsung\BIRD-DETECTION\
 │
-├── .gitignore                  # Git ignore rules (excludes checkpoints/, data/, __pycache__/)
+├── .gitignore                      # Git ignore rules
+├── README.md                       # This file
 │
-├── README.md                   # This file - full project documentation
+├── Bird_Detection_Colab.ipynb      # YOLOv8 training notebook (Colab)
 │
-├── requirements.txt            # Python dependencies (torch, torchvision, pillow, etc.)
+├── camera_inference.py             # Webcam detection (real-time)
+├── test_image.py                   # Single-image detection
+├── test_video.py                   # Video detection (real-time preview)
 │
-├── train.py                    # Main training script (run this to train the model)
+├── data_detection/                 # Dataset (YOLO format)
+│   ├── train/
+│   │   ├── images/                 # 760 training images
+│   │   └── labels/                 # Labels (class 0 = bird)
+│   └── val/
+│       ├── images/                 # 190 validation images
+│       └── labels/
 │
-├── main.ipynb                  # Jupyter notebook for inference (run this to test predictions)
+├── checkpoints/
+│   └── best.pt                     # Trained YOLOv8-nano model (~6MB)
 │
-├── models/                     # Model architecture folder
-│   ├── __init__.py             # Makes 'models' a Python package (empty file)
-│   └── model.py                # BirdCNN class definition (the neural network)
-│
-├── utils/                      # Utility functions folder
-│   ├── __init__.py             # Makes 'utils' a Python package (empty file)
-│   └── dataset.py              # Data loading, transforms, and DataLoader creation
-│
-├── data/                       # Dataset folder (YOU must organize your images here)
-│   ├── train/                  # Training images (70-80% of your data)
-│   │   ├── species_name_1/     # One subfolder per bird species
-│   │   │   ├── img_001.jpg     # Individual bird images
-│   │   │   ├── img_002.jpg
-│   │   │   └── ...
-│   │   ├── species_name_2/
-│   │   └── ...
-│   │
-│   ├── val/                    # Validation images (10-15% of your data)
-│   │   ├── species_name_1/     # Same species folders as train/
-│   │   ├── species_name_2/
-│   │   └── ...
-│   │
-│   └── test/                   # Test images (10-15% of your data)
-│       ├── species_name_1/     # Same species folders as train/
-│       ├── species_name_2/
-│       └── ...
-│
-└── checkpoints/                # Saved model weights (created during training)
-    ├── best_model.pth          # Best model based on validation accuracy
-    └── final_model.pth         # Final model after all epochs
+└── venv/                           # Python virtual environment
 ```
-
-### What Each Folder Does
-
-| Folder | Purpose | When Created |
-|--------|---------|--------------|
-| `models/` | Stores the neural network architecture code | You create this |
-| `utils/` | Stores helper code (data loading, transforms) | You create this |
-| `data/` | Stores all bird images organized by species | You organize this |
-| `data/train/` | Images used to train the model (model sees these) | You organize this |
-| `data/val/` | Images used to check progress during training | You organize this |
-| `data/test/` | Images used for final evaluation (never seen by model) | You organize this |
-| `checkpoints/` | Stores saved model weights (.pth files) | Created during training |
-
-### What Each File Does
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `train.py` | ~157 | Main entry point - run this to train the model |
-| `models/model.py` | ~86 | Defines the BirdCNN architecture (layers, forward pass) |
-| `utils/dataset.py` | ~101 | Handles loading images, applying transforms, batching |
-| `main.ipynb` | ~92 | Notebook for testing predictions on new images |
-| `requirements.txt` | ~6 | Lists all Python packages needed |
-| `.gitignore` | ~7 | Tells Git which files/folders to ignore |
-| `README.md` | ~255 | This documentation file |
-
-### Data Flow
-
-```
-YOUR IMAGES (organized in data/ folder)
-        │
-        ▼
-  dataset.py (loads images, applies transforms)
-        │
-        ▼
-  train.py (feeds batches to model, computes loss, updates weights)
-        │
-        ▼
-  model.py (BirdCNN learns to extract features and classify)
-        │
-        ▼
-  checkpoints/best_model.pth (saved trained weights)
-        │
-        ▼
-  main.ipynb (loads weights, predicts on new images)
-```
-
----
-
-## Architecture
-
-```
-BirdCNN Architecture (Input: 224x224x3)
-========================================
-
-FEATURE EXTRACTOR (Convolutional Layers):
------------------------------------------
-Block 1: Conv(3->32) -> BN -> ReLU -> Conv(32->32) -> BN -> ReLU -> MaxPool -> Dropout
-  - Detects: edges, basic textures, color gradients
-  - Output: 112x112x32
-
-Block 2: Conv(32->64) -> BN -> ReLU -> Conv(64->64) -> BN -> ReLU -> MaxPool -> Dropout
-  - Detects: patterns, textures, simple shapes
-  - Output: 56x56x64
-
-Block 3: Conv(64->128) -> BN -> ReLU -> Conv(128->128) -> BN -> ReLU -> MaxPool -> Dropout
-  - Detects: complex patterns, feather arrangements
-  - Output: 28x28x128
-
-Block 4: Conv(128->256) -> BN -> ReLU -> Conv(256->256) -> BN -> ReLU -> AdaptiveAvgPool
-  - Detects: high-level features, bird parts (beak, wings, tail)
-  - Output: 1x1x256
-
-CLASSIFIER (Fully Connected Layers):
--------------------------------------
-Flatten -> Dropout(0.5) -> Linear(256->512) -> ReLU -> Dropout(0.3)
-       -> Linear(512->256) -> ReLU -> Dropout(0.2) -> Linear(256->num_classes)
-
-Total Parameters: ~2.8M
-```
-
-### Layer-by-Layer Explanation
-
-| Layer | Purpose | Why Used |
-|-------|---------|----------|
-| `Conv2d` | Extracts features from image patches | Learns spatial patterns like edges, textures |
-| `BatchNorm2d` | Normalizes activations | Stabilizes training, allows higher learning rates |
-| `ReLU` | Adds non-linearity | Without this, model can only learn linear relationships |
-| `MaxPool2d` | Reduces spatial dimensions | Reduces computation, adds translation invariance |
-| `Dropout2d` | Randomly zeros feature maps | Prevents overfitting during training |
-| `AdaptiveAvgPool2d` | Fixed-size output (1x1) | Allows any input size, produces global features |
-| `Linear` | Fully connected classification | Maps features to class scores |
-| `Dropout` | Randomly zeros neurons | Prevents overfitting in classifier |
 
 ---
 
 ## Dataset Structure
 
-Your data folder must be organized like this:
+The dataset uses **YOLO format**:
 
 ```
-data/
-├── train/                    # Training images (70-80% of data)
-│   ├── species_name_1/       # One folder per bird species
-│   │   ├── img_001.jpg       # Images of this species
-│   │   ├── img_002.jpg
-│   │   └── ...
-│   ├── species_name_2/
-│   │   ├── img_001.jpg
-│   │   └── ...
-│   └── ...
-├── val/                      # Validation images (10-15% of data)
-│   ├── species_name_1/
-│   ├── species_name_2/
-│   └── ...
-└── test/                     # Test images (10-15% of data)
-    ├── species_name_1/
-    ├── species_name_2/
-    └── ...
+data_detection/
+├── train/
+│   ├── images/          # Training images (.jpg)
+│   └── labels/          # Labels (.txt, same name as image)
+├── val/
+│   ├── images/
+│   └── labels/
 ```
 
-### Data Requirements
-- **Minimum**: 50-100 images per species for decent results
-- **Recommended**: 200-500+ images per species
-- **Image formats**: JPG, JPEG, PNG, BMP, WEBP
-- **Image size**: Any size (auto-resized to 224x224 during training)
+### Label File Format
+Each `.txt` line (one per bird):
+```
+class_id x_center y_center width height
+```
+Example:
+```
+0 0.567 0.234 0.110 0.090
+```
+- `class_id` = 0 (bird)
+- Coordinates are **normalized** (0-1), relative to image size
 
-### Recommended Datasets (Kaggle)
-| Dataset | Species | Images | Link |
-|---------|---------|--------|------|
-| CUB-200-2011 | 200 | ~12,000 | Search "CUB-200" on Kaggle |
-| Birds-250 | 250 | ~30,000 | Search "birds-250" on Kaggle |
-| NABirds | 555 | ~48,000 | Search "NABirds" on Kaggle |
-| iNaturalist Birds | 1000+ | 100,000+ | Search "iNaturalist" on Kaggle |
+> **Note**: The original dataset used class ID `24`. Since we only have one class, all labels are fixed to `0`. The notebook does this automatically.
+
+### Source Dataset
+- **Dataset**: [samuelayman/bird-dataset](https://www.kaggle.com/datasets/samuelayman/bird-dataset) on Kaggle
+- **Size**: 950 images, 1 class ("bird")
+- **Split**: 760 train / 190 val (80/20)
 
 ---
 
 ## Installation
 
-### Local Machine (for code editing/testing)
+### Local Machine
 ```bash
-# Clone or download the project
-cd D:\samsung\BIRD-DETECTION
+# Create virtual environment
+python -m venv venv
+
+# Activate it (Windows)
+venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install ultralytics opencv-python
 ```
 
-### Kaggle (for training with GPU)
-```bash
-# In Kaggle notebook, run this in first cell:
-!pip install -r requirements.txt
-```
+### Requirements
+| Package | Purpose |
+|---------|---------|
+| ultralytics | YOLOv8 model (train + inference) |
+| opencv-python | Camera, video, image drawing |
 
 ---
 
-## Training on Kaggle
+## Training on Colab
 
-### Step-by-Step Guide
+The `Bird_Detection_Colab.ipynb` notebook handles everything:
 
-**Step 1: Prepare Dataset**
-- Download a bird dataset from Kaggle Datasets
-- Ensure it follows the folder structure above (train/val/test)
+### Setup (one-time)
+1. Upload `data_detection/` to Google Drive > `BIRD` folder
+2. Runtime → Change runtime type → **GPU (T4)**
+3. Run all cells in order
 
-**Step 2: Upload to Kaggle**
-- Create a new Kaggle notebook
-- Upload `models/model.py`, `utils/dataset.py`, `train.py` to the notebook
-- OR add the dataset to your Kaggle notebook as input
+### Notebook Cells (in order)
+1. **Setup** - Mount Drive, copy data to local Colab disk, fix labels (24→0)
+2. **Install** - `pip install ultralytics`
+3. **Create YAML** - Generate `bird_data.yaml` (1 class: bird)
+4. **Train** - Fine-tune YOLOv8-nano (50 epochs, imgsz 640, batch 16)
+5. **Save Model** - Copy `best.pt` to Drive (persists after runtime ends)
 
-**Step 3: Run Training**
-```python
-# In Kaggle notebook cell:
-!python train.py
+### Inference cells
+6. **Single Image** - Detect birds in one image
+7. **Batch** - Run detection on the whole val folder
+
+### Why copy to local disk?
+- Reading from Google Drive is slow (~10+ min for a copy that takes 30 sec locally)
+- The notebook copies data to Colab's local SSD first → fast training, no "corrupt image" errors
+
+### Training Speed
+- T4 GPU: ~35-40 sec/epoch, 50 epochs ≈ 30 min
+- YOLOv8-nano is small (~3.2M params) so it trains fast
+
+---
+
+## Inference
+
+All scripts auto-detect the model at `checkpoints/best.pt`.
+
+```bash
+# Webcam (real-time)
+python camera_inference.py
+
+# Single image (edit IMAGE_PATH in test_image.py first)
+python test_image.py
+
+# Video (real-time preview, edit VIDEO_PATH in test_video.py first)
+python test_video.py
 ```
 
-**Step 4: Download Results**
-- After training, download `checkpoints/best_model.pth`
-- Use `main.ipynb` locally for inference
+### Controls
+- Press **`q`** to quit camera / video
 
-### Kaggle Settings
-- **Enable GPU**: Settings -> Accelerator -> GPU (P100 or T4)
-- **Enable Internet**: Settings -> Internet -> On (for pip install)
+### Real-time speed tips (CPU)
+| Setting | Speed | Accuracy |
+|---------|-------|----------|
+| `imgsz=640` | baseline | best for small birds |
+| `imgsz=320` | ~2x faster | good for large birds |
+| GPU (Colab) | ~50+ FPS | best |
+
+### Auto GPU detection
+Scripts automatically use CUDA if available, else fall back to CPU:
+```python
+device = 0 if torch.cuda.is_available() else 'cpu'
+```
 
 ---
 
 ## Files Description
 
-| File | Purpose | What It Does |
-|------|---------|--------------|
-| `models/model.py` | Model architecture | Defines the BirdCNN neural network |
-| `utils/dataset.py` | Data loading | Loads images, applies transforms, creates batches |
-| `train.py` | Training script | Main training loop, saves best model |
-| `main.ipynb` | Inference demo | Load trained model and predict on new images |
-| `requirements.txt` | Dependencies | List of required Python packages |
-| `.gitignore` | Git ignore | Files/folders to exclude from version control |
-| `checkpoints/` | Saved models | Stores trained model weights (.pth files) |
-| `data/` | Dataset | Your bird images organized by species |
+| File | Purpose |
+|------|---------|
+| `Bird_Detection_Colab.ipynb` | Full YOLOv8 training + inference notebook |
+| `camera_inference.py` | Real-time webcam detection |
+| `test_image.py` | Single image detection (saves `result.jpg`) |
+| `test_video.py` | Video detection with live preview (saves `video_result.mp4`) |
+| `checkpoints/best.pt` | Trained YOLOv8-nano model |
 
 ---
 
-## Hyperparameters
+## Models Used
 
-These are the default settings in `train.py`:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `BATCH_SIZE` | 32 | Number of images per training step |
-| `IMAGE_SIZE` | 224 | Input image resolution (224x224) |
-| `NUM_EPOCHS` | 50 | Number of complete training passes |
-| `LEARNING_RATE` | 0.001 | Step size for optimizer |
-| `NUM_WORKERS` | 2 | Parallel data loading threads |
-
-### Tuning Tips
-- **Low accuracy?** Try: more epochs, more data, data augmentation
-- **Overfitting?** Try: more dropout, less epochs, more data
-- **Training too slow?** Try: smaller batch size, fewer workers
-- **GPU out of memory?** Try: smaller batch size (16 or 8)
+### YOLOv8-nano (Ultralytics)
+- Pretrained on COCO (already knows "bird"), fine-tuned on our dataset
+- **Task**: Detection (bounding boxes)
+- **Parameters**: ~3.2M
+- **File size**: ~6MB
+- **Training**: 50 epochs on Colab T4 (~30 min)
+- **Speed**: Real-time on CPU, very fast on GPU
 
 ---
 
 ## Tips for Better Accuracy
 
-1. **More Data**: At least 100+ images per species
-2. **Balanced Classes**: Same number of images per species
-3. **Clean Data**: Remove mislabeled or corrupted images
-4. **Data Augmentation**: Already built-in (flips, rotation, color jitter)
-5. **Transfer Learning**: Replace this CNN with EfficientNet for higher accuracy
-6. **Train Longer**: Try 100-200 epochs if you have time
-7. **Learning Rate**: Try 0.0005 if training is unstable
+1. **More data**: 950 images is small - collect more bird images
+2. **Train longer**: Try 100+ epochs with early stopping
+3. **Bigger model**: Try YOLOv8s / YOLOv8m for higher accuracy (slower)
+4. **Higher resolution**: `imgsz=640` captures small birds better
+5. **Data augmentation**: ultralytics has built-in augmentation (flips, HSV, mosaic)
+6. **Bad detections**: Lower `conf` threshold (e.g. 0.25 → 0.15) to catch more birds, raise it to reduce false positives
 
 ---
 
 ## Quick Start Commands
 
 ```bash
-# Test model architecture
-python models/model.py
+# Webcam detection (real-time)
+D:\samsung\BIRD-DETECTION\venv\Scripts\python.exe camera_inference.py
 
-# Test data loading
-python utils/dataset.py
+# Single image test
+D:\samsung\BIRD-DETECTION\venv\Scripts\python.exe test_image.py
 
-# Train the model
-python train.py
-
-# Inference (use main.ipynb)
+# Video detection
+D:\samsung\BIRD-DETECTION\venv\Scripts\python.exe test_video.py
 ```
-
----
-
-## Requirements
-
-- Python 3.8+
-- PyTorch 2.0+
-- torchvision 0.15+
-- Pillow 9.0+
-- numpy 1.24+
-- matplotlib 3.7+
-- tqdm 4.65+
 
 ---
 
