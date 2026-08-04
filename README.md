@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/917be287-1947-4b51-a0ee-d099962f12d6
+
 # Bird Detection
 
 A deep learning project that **detects** birds in images and videos (bounding boxes + confidence) using **YOLOv8-nano**, fine-tuned on Google Colab (T4 GPU) and run locally.
