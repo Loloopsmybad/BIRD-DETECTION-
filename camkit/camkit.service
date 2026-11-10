@@ -1,0 +1,15 @@
+[Unit]
+Description=Camera Lab - CSI IMX219 live view + controls on :8889
+After=birdboard.service wifi-up.service
+
+[Service]
+ExecStartPre=-/bin/systemctl stop birdboard
+ExecStartPre=-/bin/sh -c "/usr/bin/pkill -f frame_pumper >/dev/null 2>&1; exit 0"
+ExecStart=/usr/bin/python3 /home/root/camkit/camkit.py
+WorkingDirectory=/home/root/camkit
+Restart=on-failure
+RestartSec=2
+ExecStopPost=-/bin/systemctl start birdboard
+
+[Install]
+WantedBy=multi-user.target

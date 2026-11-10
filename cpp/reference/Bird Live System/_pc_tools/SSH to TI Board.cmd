@@ -1,0 +1,3 @@
+@echo off
+echo Connecting to TI SK-AM62 board (root@192.168.1.22)...
+ssh tibird

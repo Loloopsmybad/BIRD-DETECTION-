@@ -1,265 +1,174 @@
+# Bird Detection — live YOLOv8 on the TI SK-AM62 evaluation board
 
+A deep-learning bird detection project (**YOLOv8-nano**, bounding boxes +
+confidence, single class `bird`) with **two complete live operating modes**:
 
-https://github.com/user-attachments/assets/917be287-1947-4b51-a0ee-d099962f12d6
+| mode | what runs where | status |
+|---|---|---|
+| **PC** | webcam / image / video detection scripts (`training\tools\`) | quick checks using the trained model |
+| **Fully on the evaluation board** | the *entire* pipeline — camera capture, color processing, JPEG, detection inference with ONNX Runtime, annotation, and the HTTP dashboard — **runs locally on the TI SK-AM62 EVM board**, no PC, no server, no cloud | **production** |
 
-# Bird Detection
-
-A deep learning project that **detects** birds in images and videos (bounding boxes + confidence) using **YOLOv8-nano**, fine-tuned on Google Colab (T4 GPU) and run locally.
-
-## Demo
-
-<video src="bird.mp4" controls width="640"></video>
-
-> **Note**: GitHub only renders videos under 100MB. If this shows "video too large", compress `bird.mp4` (e.g. `ffmpeg -i bird.mp4 -vcodec libx264 -crf 28 -preset fast bird_small.mp4`) and rename it to `bird.mp4`.
-
----
-
-## Table of Contents
-1. [Project Overview](#project-overview)
-2. [Project Folder Structure](#project-folder-structure)
-3. [Dataset Structure](#dataset-structure)
-4. [Installation](#installation)
-5. [Training on Colab](#training-on-colab)
-6. [Inference](#inference)
-7. [Files Description](#files-description)
-8. [Models Used](#models-used)
-9. [Tips for Better Accuracy](#tips)
-10. [Quick Start Commands](#quick-start-commands)
+This repo is written so that **everything needed to run live inference
+locally on the evaluation board (TI SK-AM62 EVM)** is here: the C sources,
+the python parity system, the camera-tuning lab, the shared capture stage,
+the systemd units, and the full technical story of how we measured the
+hardware, tuned the camera, and got every piece up and running.
 
 ---
 
-## Project Overview
+## Live on the board right now
 
-This project uses **Supervised Learning** with **YOLOv8-nano** (a lightweight, fast object detector) to **detect** birds.
+| thing | where |
+|---|---|
+| live dashboard (annotated MJPEG stream + settings) | <http://192.168.1.22:8888/> |
+| clean (no boxes) stream | <http://192.168.1.22:8888/stream?raw=1> |
+| detection meta JSON | <http://192.168.1.22:8888/meta.json> |
+| camera status JSON | <http://192.168.1.22:8888/phone> |
+| camera tuning lab (port 8889) | <http://192.168.1.22:8889/> |
 
-### Classification vs Detection
-| Task | Question | Output |
-|------|----------|--------|
-| **Classification** | "What is in this image?" | Class label (e.g., "Bird") |
-| **Detection** (this project) | "Where is the bird?" | Bounding boxes + confidence |
-
-The model draws a bounding box around every detected bird with a confidence score.
-
-### Why YOLOv8-nano?
-| Approach | Problem |
-|----------|---------|
-| Custom CNN | Detected birds but boxes were imprecise |
-| Teachable Machine (Keras) | Fast but classification only (no boxes) |
-| **YOLOv8-nano** (this project) | Fast **AND** accurate bounding boxes (best of both) |
-
-### Key Concepts
-| Term | Meaning |
-|------|---------|
-| **Bounding Box** | Rectangle around the detected bird (x1, y1, x2, y2) |
-| **Confidence** | Probability (0-1) that a box contains a bird |
-| **IoU** | Intersection over Union - measures box overlap accuracy |
-| **Epoch** | One complete pass through the entire training dataset |
-| **Batch** | Number of images processed at once before updating weights |
-| **mAP** | Mean Average Precision - standard detection accuracy metric |
-| **imgsz** | Inference resolution (640 = accurate, 320 = fast) |
+Design in one paragraph: **live-media-only** — the snapshot JPEG endpoints
+are gone; the camera runs *only* while someone watches `/stream`
+(the dashboard's embedded `<img>` starts it). ~12 s after the last viewer
+closes, the capture pump is SIGSTOP-ed and CPU drops to ~zero; the next
+viewer resumes it instantly with the ORT session kept warm. Inference is
+**fully native** — onnxruntime C API (dlopen), YOLOv8 NMS, box drawing and
+the result JSON are all C; no python executes on the board while the C
+service is up.
 
 ---
 
-## Project Folder Structure
+## What runs the inference on the board
+
+| stage | detail |
+|---|---|
+| camera | Arducam V2.2 (IMX219) CSI, `/dev/video0`, RG10 Bayer, 4.15 MB/frame DMA |
+| capture | `frame_pumper` — 4-thread C stage copying the uncached DMA buffer at ~21 fps through a pipe (see note below on the hardware wall) |
+| color | 2x2 Bayer bin → gray-world AWB EMA → gamma 0.55 LUT |
+| JPEG | libturbojpeg, declared locally (board ships no header) |
+| detection | YOLOv8-nano `best.onnx` (also produced by `training\`) through onnxruntime 1.31.1 C API, 4 intra threads, ~1.2 s/forward |
+| serve | C99 HTTP server in `cpp\birdcpp.c` — dashboard, MJPEG `/stream`, `/meta.json`, `/phone`, `/camera-set` |
+
+That ~21 fps capture ceiling is **not** software slowness: the camera's DMA
+memory reads at ~12 ms/MB uncached on this SoC, and every frame is 4 MB —
+the pipes/threads exist to work around exactly that wall. The full
+measurement table and every number's provenance: **[CAMERA_PIPELINE.md](CAMERA_PIPELINE.md)**.
+
+---
+
+## Repository layout
 
 ```
-D:\samsung\BIRD-DETECTION\
+BIRD-DETECTION\
+├── README.md                  <- this file
+├── CAMERA_PIPELINE.md          <- technical pipeline doc + bring-up timeline (start here)
 │
-├── .gitignore                      # Git ignore rules
-├── README.md                       # This file
+├── cpp\                        <- C VERSION - the production board system
+│   ├── birdcpp.c               <- single-file C99 server (capture+infer+HTTP, ~2,900 lines)
+│   ├── Makefile                <- gcc -O2 ... on the board (ORT include/lib paths)
+│   ├── ort_probe.c             <- frozen feasibility probe for dlopen-ORT
+│   ├── deploy\birdcpp.service  <- systemd unit
+│   ├── README.md               <- build/deploy/run, endpoints, benchmarks, troubleshooting
+│   └── reference\              <- frozen python snapshot at port time + retired sidecar
 │
-├── Bird_Detection_Colab.ipynb      # YOLOv8 training notebook (Colab)
+├── python\                     <- PYTHON VERSION - original live system (parity + handback)
+│   ├── board_camera_server.py  <- the all-python birdboard (deployed at /home/root/bird)
+│   ├── board_detection.py      <- YOLOv8 inference module (C version checked against it)
+│   ├── best.onnx               <- deployed model copy (identical to training\checkpoints\best.onnx)
+│   ├── README.md / README.txt  <- board info, addresses, services, troubleshooting
+│   ├── artifacts\              <- frozen detection snapshots (python era)
+│   └── legacy\                 <- early drafts kept for history
 │
-├── camera_inference.py             # Webcam detection (real-time)
-├── test_image.py                   # Single-image detection
-├── test_video.py                   # Video detection (real-time preview)
+├── camkit\                     <- CAMERA TUNING LAB (python, port 8889)
+│   └── camkit.py (+ service)   <- live view + every driver control + phase verify/WB
 │
-├── data_detection/                 # Dataset (YOLO format)
-│   ├── train/
-│   │   ├── images/                 # 760 training images
-│   │   └── labels/                 # Labels (class 0 = bird)
-│   └── val/
-│       ├── images/                 # 190 validation images
-│       └── labels/
+├── frame_pumper\               <- SHARED capture stage (C, source of the on-board binary)
 │
-├── checkpoints/
-│   └── best.pt                     # Trained YOLOv8-nano model (~6MB)
+├── pc-tools\                   <- PC-side ops: SSH/deploy shortcuts, camera bridge
 │
-└── venv/                           # Python virtual environment
+├── training\                   <- the model itself
+│   ├── Bird_Detection_Colab.ipynb   <- YOLOv8-nano fine-tune notebook (Colab T4)
+│   ├── data_detection\         <- YOLO dataset (760 train / 190 val, 1 class)
+│   ├── checkpoints\            <- best.pt (+ exported best.onnx = what the board runs)
+│   ├── tools\                  <- PC webcam/image/video detection scripts
+│   └── README.md               <- training usage, dataset format, tips
+│
+├── media\                      <- demo/model-test videos and output snapshots
+└── venv\                       <- shared local python environment (PC side)
 ```
 
 ---
 
-## Dataset Structure
+## How we got everything up and running (the short version)
 
-The dataset uses **YOLO format**:
+The long version — measurements, kernel ABI tables, tuning math, traps — is
+[`CAMERA_PIPELINE.md`](CAMERA_PIPELINE.md) (§6 is a chronological
+bring-up timeline). The shape of it:
 
-```
-data_detection/
-├── train/
-│   ├── images/          # Training images (.jpg)
-│   └── labels/          # Labels (.txt, same name as image)
-├── val/
-│   ├── images/
-│   └── labels/
-```
-
-### Label File Format
-Each `.txt` line (one per bird):
-```
-class_id x_center y_center width height
-```
-Example:
-```
-0 0.567 0.234 0.110 0.090
-```
-- `class_id` = 0 (bird)
-- Coordinates are **normalized** (0-1), relative to image size
-
-> **Note**: The original dataset used class ID `24`. Since we only have one class, all labels are fixed to `0`. The notebook does this automatically.
-
-### Source Dataset
-- **Dataset**: [samuelayman/bird-dataset](https://www.kaggle.com/datasets/samuelayman/bird-dataset) on Kaggle
-- **Size**: 950 images, 1 class ("bird")
-- **Split**: 760 train / 190 val (80/20)
+1. **Measure the hardware first.** Every capture path on the board was
+   benchmarked; the uncached-DMA wall (~12 ms/MB) decided the whole design,
+   and the 4-thread C frame_pumper became the one capture stage shared by
+   everything.
+2. **Tune the camera with a lab, not by feel.** `camkit` exposed every
+   driver control; test-pattern lattice scoring pinned the Bayer phase;
+   gray-world AWB + gamma LUT fixed the green cast.
+3. **Get an end-to-end system working in python** (capture → inference →
+   live dashboard, no disk writes) — this defined the routes, defaults and
+   semantics everything later had to match byte-for-byte (`/camera-set`
+   semantics are verbatim).
+4. **Port to C99 in one file** (`cpp\birdcpp.c`): same routes, same
+   defaults, turboJPEG locally declared — then reworked the design:
+   snapshot endpoints removed, capture gated on viewers, inference moved
+   fully into native ORT via dlopen.
+5. **Operate it with the small toolkit** in `pc-tools\` (SSH/deploy
+   shortcuts) and the docs: `cpp\README.md` for the C service,
+   `python\README.txt` for board addresses/credentials, and the
+   troubleshooting history that documents every footgun we actually hit.
 
 ---
 
-## Installation
+## Quick start
 
-### Local Machine
-```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate it (Windows)
-venv\Scripts\activate
-
-# Install dependencies
-pip install ultralytics opencv-python
-```
-
-### Requirements
-| Package | Purpose |
-|---------|---------|
-| ultralytics | YOLOv8 model (train + inference) |
-| opencv-python | Camera, video, image drawing |
-
----
-
-## Training on Colab
-
-The `Bird_Detection_Colab.ipynb` notebook handles everything:
-
-### Setup (one-time)
-1. Upload `data_detection/` to Google Drive > `BIRD` folder
-2. Runtime → Change runtime type → **GPU (T4)**
-3. Run all cells in order
-
-### Notebook Cells (in order)
-1. **Setup** - Mount Drive, copy data to local Colab disk, fix labels (24→0)
-2. **Install** - `pip install ultralytics`
-3. **Create YAML** - Generate `bird_data.yaml` (1 class: bird)
-4. **Train** - Fine-tune YOLOv8-nano (50 epochs, imgsz 640, batch 16)
-5. **Save Model** - Copy `best.pt` to Drive (persists after runtime ends)
-
-### Inference cells
-6. **Single Image** - Detect birds in one image
-7. **Batch** - Run detection on the whole val folder
-
-### Why copy to local disk?
-- Reading from Google Drive is slow (~10+ min for a copy that takes 30 sec locally)
-- The notebook copies data to Colab's local SSD first → fast training, no "corrupt image" errors
-
-### Training Speed
-- T4 GPU: ~35-40 sec/epoch, 50 epochs ≈ 30 min
-- YOLOv8-nano is small (~3.2M params) so it trains fast
-
----
-
-## Inference
-
-All scripts auto-detect the model at `checkpoints/best.pt`.
+### On the board (production path)
 
 ```bash
-# Webcam (real-time)
-python camera_inference.py
-
-# Single image (edit IMAGE_PATH in test_image.py first)
-python test_image.py
-
-# Video (real-time preview, edit VIDEO_PATH in test_video.py first)
-python test_video.py
+systemctl start birdcpp        # C birdbirdboard on :8888 (stops python birdboard)
 ```
 
-### Controls
-- Press **`q`** to quit camera / video
+Build/deploy details (scp, make, flags): [`cpp\README.md`](cpp/README.md).
 
-### Real-time speed tips (CPU)
-| Setting | Speed | Accuracy |
-|---------|-------|----------|
-| `imgsz=640` | baseline | best for small birds |
-| `imgsz=320` | ~2x faster | good for large birds |
-| GPU (Colab) | ~50+ FPS | best |
-
-### Auto GPU detection
-Scripts automatically use CUDA if available, else fall back to CPU:
-```python
-device = 0 if torch.cuda.is_available() else 'cpu'
-```
-
----
-
-## Files Description
-
-| File | Purpose |
-|------|---------|
-| `Bird_Detection_Colab.ipynb` | Full YOLOv8 training + inference notebook |
-| `camera_inference.py` | Real-time webcam detection |
-| `test_image.py` | Single image detection (saves `result.jpg`) |
-| `test_video.py` | Video detection with live preview (saves `video_result.mp4`) |
-| `checkpoints/best.pt` | Trained YOLOv8-nano model |
-
----
-
-## Models Used
-
-### YOLOv8-nano (Ultralytics)
-- Pretrained on COCO (already knows "bird"), fine-tuned on our dataset
-- **Task**: Detection (bounding boxes)
-- **Parameters**: ~3.2M
-- **File size**: ~6MB
-- **Training**: 50 epochs on Colab T4 (~30 min)
-- **Speed**: Real-time on CPU, very fast on GPU
-
----
-
-## Tips for Better Accuracy
-
-1. **More data**: 950 images is small - collect more bird images
-2. **Train longer**: Try 100+ epochs with early stopping
-3. **Bigger model**: Try YOLOv8s / YOLOv8m for higher accuracy (slower)
-4. **Higher resolution**: `imgsz=640` captures small birds better
-5. **Data augmentation**: ultralytics has built-in augmentation (flips, HSV, mosaic)
-6. **Bad detections**: Lower `conf` threshold (e.g. 0.25 → 0.15) to catch more birds, raise it to reduce false positives
-
----
-
-## Quick Start Commands
+### Back to the python board
 
 ```bash
-# Webcam detection (real-time)
-D:\samsung\BIRD-DETECTION\venv\Scripts\python.exe camera_inference.py
-
-# Single image test
-D:\samsung\BIRD-DETECTION\venv\Scripts\python.exe test_image.py
-
-# Video detection
-D:\samsung\BIRD-DETECTION\venv\Scripts\python.exe test_video.py
+systemctl stop birdcpp
+systemctl start birdboard      # no auto-restart exists by design
 ```
+
+### PC-side model checks
+
+```
+venv\Scripts\python.exe training\tools\camera_inference.py   # webcam
+venv\Scripts\python.exe training\tools\test_image.py         # single image
+venv\Scripts\python.exe training\tools\test_video.py         # video
+```
+
+(`venv\` must stay at the repo root; activation scripts hardcode it.)
 
 ---
 
-## License
+## Model / training
 
-This project is for educational purposes. Use any bird dataset that permits research use.
+YOLOv8-nano, fine-tuned on a 950-image bird dataset (760/190 split,
+Colab T4, ~30 min) — dataset, notebook, checkpoints and accuracy tips:
+[`training\README.md`](training/README.md).
+
+---
+
+### Service pointer cheat-sheet
+
+| task | command |
+|---|---|
+| C birdboard live | `systemctl start birdcpp` (stops birdboard) |
+| back to python birdboard | `systemctl stop birdcpp` → `systemctl start birdboard` manually |
+| camera lab | `systemctl start camkit` (:8889) |
+| logs | `journalctl -u birdcpp -f` |
+| what's on the board | `python\README.txt` (addresses, passwords, folder map) |

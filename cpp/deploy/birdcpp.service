@@ -1,0 +1,21 @@
+[Unit]
+Description=birdcpp - C birdboard, all-on-board bird detection (TI SK-AM62)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/root/birdcpp
+# live-media-only design: birdboard (python, continuous capture) may still
+# fight over the camera, so it is stopped before start; but it is NOT
+# auto-started on stop anymore - with gated capture there is no hand-back.
+# Start birdboard manually if the python board is wanted again.
+ExecStartPre=/bin/sh -c 'systemctl stop birdboard 2>/dev/null; true'
+ExecStartPre=/bin/sh -c 'pkill -f "frame[p]umper" 2>/dev/null; true'
+ExecStart=/home/root/birdcpp/birdcpp -p 8888
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

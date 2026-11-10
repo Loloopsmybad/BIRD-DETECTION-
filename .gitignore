@@ -1,9 +1,17 @@
 __pycache__/
 *.pyc
 venv/
-video.mp4
 data/
 *.pth
 .DS_Store
 .ipynb_checkpoints/
-data_detection/
+
+# large test media (keep locally, don't commit)
+media/video.mp4
+media/video_result.mp4
+media/video.avi
+media/bird.mp4
+
+# deploy-only artifacts regenerated on the board
+*.o
+*.so

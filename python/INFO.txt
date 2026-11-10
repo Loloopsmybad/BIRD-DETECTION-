@@ -1,0 +1,102 @@
+TI SK-AM62 BIRD DETECTION - BOARD SELF-GUIDE
+(no PC needed: the whole pipeline lives on this board)
+
+WHAT THIS BOARD DOES
+  Captures video from the CSI camera (Arducam IMX219 on the camera
+  connector, /dev/video0), runs YOLOv8 (best.onnx, cv2.dnn) on-board,
+  draws boxes, and hosts the live dashboard itself on port 8888.
+  No PC required for operation. The phone camera (DroidCam over WiFi)
+  works as a fallback source - see CHANGE THE CAMERA SOURCE below;
+  both sources share the same auto-reconnect logic.
+
+ADDRESSES
+  Dashboard (open from ANY device on the WiFi):
+      http://192.168.1.22:8888/
+  Endpoints on port 8888:
+      /           dashboard   (light UI, no heavy streaming)
+      /frame.jpg  latest raw camera frame
+      /det.jpg    latest annotated result (also /live_det.jpg)
+      /meta.json  detections JSON  (n, infer_ms, dets[])
+      /phone      camera link status (connected, frame_age, attempts)
+      /stream     full-screen MJPEG stream (throttled to 1 fps)
+      /ping       health check ("board-ok")
+  SSH from any machine:   ssh tibird   -> root@192.168.1.22
+  Serial console: COM6 @ 115200, login root / password tiroot
+  CSI camera: onboard camera connector -> /dev/video0 (Arducam IMX219)
+  Phone camera (DroidCam): 192.168.1.3 port 4747
+
+FILES  (all under /home/root/bird/)
+  board_camera_server.py  MAIN program (birdboard.service):
+                          capture thread + inference thread + web server
+  board_detection.py      YOLOv8 ONNX runner (model cached after first load;
+                          in-process mode: run(...) returns the meta dict)
+  best.onnx               the trained model
+  camera_url.txt          camera source - EDIT THIS FILE to change cameras;
+                          "/dev/video0" = CSI camera (current source),
+                          "http://IP:4747/video" = DroidCam (fallback).
+                          Re-read automatically on every reconnect attempt
+  frame.jpg               latest raw frame (written by capture)
+  live_det.jpg            latest annotated frame
+  meta.json               latest detections metadata
+  INFO.txt                this file
+
+SERVICE (systemd)
+  systemctl status birdboard      the whole pipeline (enabled at boot)
+  systemctl restart birdboard
+  journalctl -u birdboard -n 50   recent logs
+  Enabled services:
+      wifi-up.service   WiFi link at BOOT (starts early: page ~25 s after power)
+      dropbird.service  RETIRED - the board image's own dropbear serves SSH
+  SSH is provided by the built-in dropbear (PID shown by: netstat -tlnp | grep :22)
+
+BOOT, timing and behavior
+  Power on -> ~25 s -> dashboard reachable; camera re-grabs automatically
+  (retries every 2 s until DroidCam answers; keep the app on WiFi Server).
+  systemd-networkd-wait-online is masked on purpose: it stalls ~2 min
+  waiting for the unplugged Ethernet port on this WiFi-only board.
+
+CSI CAMERA (Arducam IMX219) - the live source
+  /dev/video0 raw 10-bit Bayer (RG10, 1920x1080) is read directly by
+  board_camera_server.py with plain file reads (cv2.VideoCapture is
+  deliberately NOT used: it mis-negotiates RG10 to 640x480 on this
+  build). Frames are debayered (COLOR_BayerBG2BGR, phase proven with
+  the sensor solid-red test pattern), downscaled to 1280x720, auto
+  white-balanced (gray-world, smoothed so the color does not flicker)
+  and shadow-lifted with a gamma LUT, then fed to YOLOv8 in-process.
+
+  Kernel chain: imx219 4-0010 -> cdns_csi2rx -> ticsi2rx ->
+  /dev/video0..3 (see: media-ctl -d /dev/media0 -p).
+
+  Sensor tuning lives in board_camera_server.py (edit + scp +
+  systemctl restart birdboard):
+      CSI_GAIN       analogue gain 0-232 (currently 210 ~ 21 dB)
+      CSI_EXPOSURE   lines, 1759 = mode max for 1080p
+      digital_gain   written as 512 (2.0x) in csi_configure()
+
+  IMPORTANT - the IMX219 device tree lives INSIDE /boot/fitImage:
+      the stock FIT was rebuilt with only the k3-am625-sk.dtb
+      subimage swapped for a tree that includes the imx219 node.
+      Backup: /boot/fitImage-5.10.168-g2c23e6c538.bak
+      Do NOT reflash or overwrite the FIT casually - the camera
+      driver only probes because of that merged tree.
+
+PHONE CAMERA (DROIDCAM) RULES  - fallback source
+  * DroidCam serves ONE client at a time; the board is that client.
+    Do NOT also run the PC bridge (camera_bridge.py) at the same time.
+  * Keep the DroidCam app open on the WiFi Server screen.
+  * Phone screen on/unlocked keeps DroidCam streaming; if it stalls,
+    the board detects "no frames" and reconnects automatically.
+  * Camera link down -> board retries every 2 s (status in /phone).
+
+CHANGE THE CAMERA SOURCE  (CSI camera <-> phone, no restart needed)
+  echo /dev/video0 > /home/root/bird/camera_url.txt          (CSI camera)
+  echo http://PHONE_IP:4747/video > /home/root/bird/camera_url.txt (phone)
+  No restart needed: the URL is re-read at every reconnect attempt
+  (every 2 s while a camera is down) and /phone always shows the
+  selected source, its status and the retry count.
+
+QUICK CHECKS
+  curl http://192.168.1.22:8888/ping        board alive?
+  curl http://192.168.1.22:8888/phone       camera link OK? frames flowing?
+  systemctl is-active birdboard             service running?
+  top                                       busy? python3 should be the top user
