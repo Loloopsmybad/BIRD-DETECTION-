@@ -11,7 +11,18 @@ WorkingDirectory=/home/root/birdcpp
 # Start birdboard manually if the python board is wanted again.
 ExecStartPre=/bin/sh -c 'systemctl stop birdboard 2>/dev/null; true'
 ExecStartPre=/bin/sh -c 'pkill -f "frame[p]umper" 2>/dev/null; true'
-ExecStart=/home/root/birdcpp/birdcpp -p 8888
+ExecStart=/home/root/birdcpp/birdcpp -p 8888 -m /home/root/birdcpp/best_448.onnx --img 448
+# model history (all three onnx stay deployed in /home/root/birdcpp):
+#   best.onnx     640 - original (cycle ~1810 ms, mAP50 0.832)
+#   best_448.onnx 448 - promoted 2026-11-10 from OPTION-A trial
+#                       (cycle 2830->~1090 ms live, mAP50 0.806)
+#   best_448.onnx 448 - RUNNING since 2026-11-10 (user preference):
+#                       balanced pick (~790-1190 ms cycles, mAP50 0.806)
+#   best_384.onnx 384 - speed-first: ran on :8888 briefly (~720 ms cycles,
+#                       mAP50 0.767, recalls ~6% fewer birds than 448)
+# to switch: change BOTH the -m file and --img (must match the export):
+#   ExecStart=/home/root/birdcpp/birdcpp -p 8888 -m /home/root/birdcpp/best_448.onnx --img 448
+#   ExecStart=/home/root/birdcpp/birdcpp -p 8888                (640 default)
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal

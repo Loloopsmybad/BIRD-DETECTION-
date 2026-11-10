@@ -157,11 +157,63 @@ The pipeline win is 1.5x. In this table's era the detection wall
 **Note - as of the live-media-only rework this table is partly
 historical**: detection moved fully into C (native ORT, see the next
 section), so `infer_ms` is no longer `2229-2380` but **~1158 ms
-quiesced** and ~2.5-2.8 s while the capture pipeline co-runs (first
-forward of a session, thread pools cold). The `/frame.jpg median` row
+quiesced**, ~2.5-2.8 s live in the original 4+4-thread configuration
+(first forward of a session, thread pools cold) and **~1.7 s live
+after the core partition (opt-B, below)**. The `/frame.jpg median` row
 is stale - that endpoint does not exist anymore (live media only). The
 view-fps / CPU / RSS rows remain valid measurements of the capture
 pipeline itself.
+
+## Detection stage timings (2026-11-10 instrumentation)
+
+Every detection cycle carries per-stage `clock_gettime(CLOCK_MONOTONIC)`
+timers: a one-line report every ~2 s in the journal
+(`det-stage: snap .. letterbox .. fwd .. parse .. nms .. | cycle ..`)
+plus a live `stage` block in `/phone`. Measured LIVE (annotated stream
+open, one `/dev/video0` consumer):
+
+| stage (function) | what | live |
+|---|---|---|
+| snap (`infer_thread` memcpy) | view frame -> infer snapshot | ~2-3 ms |
+| letterbox (`ort_letterbox`) | bilinear resize + CHW float | ~60-100 ms |
+| **fwd (`ort_run` -> ORT Run)** | **YOLOv8-nano 1x3x640x640 on 4xA53** | **see table below** |
+| parse (confidence filter, 8400 cands) | - | ~0 ms |
+| nms (`nms_pick` + box mapping) | - | ~0 ms |
+
+The forward pass alone is therefore **~97% of the detection wall**;
+nothing else in the port's code is slow.
+
+Core partition experiment (live `fwd`, same camera, same viewer count):
+
+| config | fwd avg | cycle | verdict |
+|---|---|---|---|
+| A: pumper 4 threads + birdcpp all cores free (original) | ~2.74 s | ~2.83 s | the starting point |
+| **B: pumper pinned to core 3, 1 thread, nice 10 (shipped)** | **~1.74 s** | **~1.81 s** | **~36% more detections/s** |
+| C: B + whole birdcpp process pinned to cores 0-2 | ~2.75 s | ~2.8 s | **rejected** - ORT's intra threads lose more from seeing only 3 cpus than they gain from the parked copier |
+
+Shipped configuration: `pumper_spawn()` pins the copier child to
+`PUMPER_CORE` (=3) with `sched_setaffinity`, sets priority +10 and
+spawns it with `threads=1` (the 1-thread pipe still yields ~14 fps >=
+the ~12 fps core-contended rate, so capture loses nothing).
+`birdcpp` itself is deliberately NOT affinity-restricted (see C).
+Detection cadence is now ~0.55/s (one annotated frame every ~1.8 s)
+instead of ~0.35/s. The remaining lever is the model's imgsz
+(640 -> 448/384 re-export), not any code in this port.
+
+**Promotion (2026-11-10, later the same day)**: the `--img` runtime
+flag was folded into production `birdcpp.c` (default still 640), the
+448 model deployed as `/home/root/birdcpp/best_448.onnx`, and the unit
+now runs
+`ExecStart=/home/root/birdcpp/birdcpp -p 8888
+            -m /home/root/birdcpp/best_448.onnx --img 448`
+Accuracy was validated first (yolo val, 191 val images / 413 birds):
+mAP50 0.832 (640) -> 0.806 (448), recall 0.753 -> 0.741 - a ~3% tax.
+Verified production timings now: **fwd ~875 ms, cycle ~915 ms,
+letterbox ~30 ms, capture ~14 fps** - about **3.1x the detection rate
+of this morning's original configuration** (2830 ms cycle).
+The 640 export stays on the board as `best.onnx`: instant revert is a
+one-line ExecStart edit (see `deploy\birdcpp.service`), and the full
+sandbox/methodology lives in `trial-a\` + `trial-a\README.txt`.
 
 ## Native ORT probe (inference fully in C?)
 

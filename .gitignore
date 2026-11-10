@@ -15,3 +15,6 @@ media/bird.mp4
 # deploy-only artifacts regenerated on the board
 *.o
 *.so
+
+# ultralytics-generated dataset cache
+labels.cache

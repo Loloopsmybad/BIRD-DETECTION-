@@ -168,7 +168,10 @@ device = 0 if torch.cuda.is_available() else 'cpu'
 | file | role |
 |---|---|
 | `checkpoints\best.pt` | trained YOLOv8-nano weights (~6 MB, ultralytics form) |
-| `checkpoints\best.onnx` | exported ONNX - **this is what the board runs** (same file that ships inside `..\python\` and on the board at `/home/root/birdcpp/best.onnx`) |
+| `checkpoints\best.onnx` | the 640-letterbox export (python-era + board fallback; before 2026-11-10 this is what the board ran) |
+| `..\cpp\trial-a\best_448.onnx` | 448-letterbox export - **what production birdcpp runs since 2026-11-10** (promoted after val: mAP50 0.806 vs 0.832 @640, cycles 1.81 s -> 0.92 s on the board) |
+| `tools\export_trial_onnx.py` | local exporter used for the 448/384 trial (no Colab needed) |
+| `data_detection\bird_val.yaml` | local dataset yaml for `yolo val` (the OPTION-A accuracy comparison) |
 
 ---
 

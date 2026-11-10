@@ -70,6 +70,8 @@
 #include <sys/prctl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sched.h>                    /* cpu affinity pin (opt-B core partition) */
+#include <sys/resource.h>             /* setpriority(2): low-prio copier         */
 
 /* ------------------------------------------------------------------ *
  * onnxruntime C API (v31 = 1.31.x): the struct OrtApi declarations come
@@ -253,7 +255,13 @@ static void sb_free(sbuf *s)
 #define F_SETPIPE_SZ_L  1031
 
 /* native YOLOv8 inference (python birdboard parity) */
-#define ORT_IMG         640            /* model letterbox size          */
+/* model letterbox size is a runtime option (--img N, multiple of 32,
+ * 320..640; default 640). The systemd unit pairs it with the deployed
+ * onnx: production runs best_448.onnx + --img 448 (promoted 2026-11-10
+ * from the trial-a measurements: cycle ~1.09 s live at -3.1% mAP50 vs
+ * 640; 640 artifact stays deployed as best.onnx fallback mode).        */
+
+static int ORT_IMG = 640;
 #define ORT_CONF        0.25f          /* score threshold               */
 #define ORT_IOU         0.45f          /* NMS IoU threshold             */
 #define MAX_DETS        64
@@ -944,6 +952,11 @@ static void pumper_kill(pid_t *p, int *rfd)
     }
 }
 
+/* opt-B core partition: the copier gets exactly one core of its own so the
+ * ORT forward pass owns the others (measured: 1 copier thread still
+ * delivers ~14 fps >= the ~12 fps live contended rate).                  */
+#define PUMPER_CORE 3
+
 static int pumper_spawn(pid_t *p, int *rfd, const char *dev, int W, int H)
 {
     const char *cands[] = { HOME_BIRDCPP "/frame_pumper",
@@ -963,13 +976,23 @@ static int pumper_spawn(pid_t *p, int *rfd, const char *dev, int W, int H)
     if (pid == 0) {
         prctl(PR_SET_PDEATHSIG, 9);      /* belt: pumper also sets it   */
         if (getppid() == 1) _exit(0);
+        /* opt-B: pin the copier to its own core + low priority so the
+         * inference forward pass keeps the remaining cores.             */
+        {
+            cpu_set_t cs;
+            CPU_ZERO(&cs);
+            CPU_SET(PUMPER_CORE, &cs);
+            if (sched_setaffinity(getpid(), sizeof(cs), &cs) != 0)
+                logf_("pumper: affinity pin failed (err %d)", errno);
+            setpriority(PRIO_PROCESS, 0, 10);
+        }
         dup2(pp[1], 1);
         close(pp[0]);
         close(pp[1]);
         char ws[16], hs[16], ts[16];
         snprintf(ws, sizeof(ws), "%d", W);
         snprintf(hs, sizeof(hs), "%d", H);
-        snprintf(ts, sizeof(ts), "4");
+        snprintf(ts, sizeof(ts), "1");   /* 1 copier thread on PUMPER_CORE */
         char *argv[] = { (char *)exe, (char *)dev, ws, hs, ts, NULL };
         execv(exe, argv);
         _exit(127);
@@ -1860,6 +1883,11 @@ static int nms_pick(const float *bx, const float *by, const float *bw,
     return k;
 }
 
+/* per-stage detection timings (last completed cycle, ms); written by the
+ * infer thread, published in /phone and throttled to the journal        */
+typedef struct { double snap, letterbox, fwd, parse, nms, cycle; } detstage_t;
+static detstage_t dett;
+
 /* full detect cycle: oin_buf must be letterboxed for (vw,vh) first     */
 static int ort_detect_cycle(int vw, int vh)
 {
@@ -1870,6 +1898,11 @@ static int ort_detect_cycle(int vw, int vh)
         return -1;
     }
     int ms = (int)((now_sec() - t0) * 1000.0);
+    g_lock();
+    dett.fwd = (double)ms;
+    dett.parse = 0.0;
+    dett.nms = 0.0;
+    g_unlock();
 
     float *op = NULL;
     if (OAPI->GetTensorMutableData(ov, (void **)&op) != NULL || !op) {
@@ -1904,6 +1937,7 @@ static int ort_detect_cycle(int vw, int vh)
     static detbox_t res[MAX_DETS];
 
     int cnt = 0;
+    double tf = now_sec();
     for (long long a = 0; a < N; a++) {
         size_t ai = (size_t)a;
         float s = layout == 1 ? op[4 * N + ai] : op[ai * 5 + 4];
@@ -1920,8 +1954,10 @@ static int ort_detect_cycle(int vw, int vh)
             cnt++;
         }
     }
+    dett.parse = (now_sec() - tf) * 1000.0;
 
     int nr = 0;
+    double tn = now_sec();
     if (cnt > 0) {
         int k = nms_pick(bx, by, bwv, bhv, scv, cnt, keep);
         for (int i = 0; i < k && nr < MAX_DETS; i++) {
@@ -1934,6 +1970,7 @@ static int ort_detect_cycle(int vw, int vh)
             nr++;
         }
     }
+    dett.nms = (now_sec() - tn) * 1000.0;
     OAPI->ReleaseValue(ov);
 
     ort_meta_publish(res, nr, ms, vw, vh);
@@ -2024,6 +2061,7 @@ static void *infer_thread(void *unused)
             logf_("ort ready (threads=%d)", oithreads);
         }
 
+        double t0 = now_sec();
         int vw, vh, ok = 0;
         g_lock();
         if (G.view_bgr && G.view_seq != G.infer_handled &&
@@ -2040,17 +2078,38 @@ static void *infer_thread(void *unused)
             G.infer_handled = G.view_seq;
             ok = 1;
         }
+        dett.snap = ok ? (now_sec() - t0) * 1000.0 : 0.0;
         g_unlock();
         if (!ok) {
             usleep(250 * 1000);
             continue;
         }
 
+        double t1 = now_sec();
         ort_letterbox(G.infer_snap, vw, vh);
+        double tt = now_sec();
+        g_lock();
+        dett.letterbox = (tt - t1) * 1000.0;
+        g_unlock();
+
         if (ort_detect_cycle(vw, vh) != 0) {
             /* one-off errors: retried next cycle */
             usleep(500 * 1000);
             continue;
+        }
+        double t2 = now_sec();
+        g_lock();
+        dett.cycle = (t2 - t0) * 1000.0;
+        g_unlock();
+
+        /* throttled stage report: one journal line every ~2 s */
+        static double last_rep = 0.0;
+        if (t2 - last_rep >= 2.0) {
+            last_rep = t2;
+            logf_("det-stage: snap %.0f letterbox %.0f fwd %.0f parse %.0f "
+                  "nms %.0f | cycle %.0f ms",
+                  dett.snap, dett.letterbox, dett.fwd, dett.parse,
+                  dett.nms, dett.cycle);
         }
         usleep(120 * 1000);
     }
@@ -2340,6 +2399,7 @@ static void phone_json(sbuf *b)
     unsigned long frames = G.frames;
     int sl = G.stream_live, sr = G.stream_raw;
     unsigned long dpubs = G.det_pubs, rpubs = G.raw_pubs;
+    detstage_t dstg = dett;
     char backend[16], note[NOTE_MAX], url[128];
     memcpy(backend, G.backend, sizeof(backend));
     memcpy(note, G.note, sizeof(note));
@@ -2367,6 +2427,11 @@ static void phone_json(sbuf *b)
     sb_appf(b, ", \"frames\": %lu", frames);
     sb_appf(b, ", \"stream_live\": %d, \"stream_raw\": %d", sl, sr);
     sb_appf(b, ", \"det_pubs\": %lu, \"raw_pubs\": %lu", dpubs, rpubs);
+    sb_appf(b, ", \"stage\": {\"snap\": %.0f, \"letterbox\": %.0f, "
+               "\"fwd\": %.0f, \"parse\": %.0f, \"nms\": %.0f, "
+               "\"cycle\": %.0f}",
+            dstg.snap, dstg.letterbox, dstg.fwd, dstg.parse, dstg.nms,
+            dstg.cycle);
     sb_appf(b, ", \"backend\": \"%s\", \"fps\": %.2f", backend, fps);
     sb_appf(b, ", \"wb\": %d, \"gamma\": %d", wb, gamma);
     sb_appf(b, ", \"mode\": \"%s\", \"scale\": \"%s\"", MODE_NM[modei],
@@ -2957,8 +3022,20 @@ int main(int argc, char **argv)
             opt_ortlib = argv[++i];
         else if (!strcmp(argv[i], "--ort-threads") && i + 1 < argc)
             opt_ortthreads = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--img") && i + 1 < argc)
+            ORT_IMG = atoi(argv[++i]);
     }
 
+    if (ORT_IMG < 320 || ORT_IMG > 640 || ORT_IMG % 32) {
+        logf_("bad --img %d (must be a multiple of 32 in 320..640)", ORT_IMG);
+        return 2;
+    }
+
+    /* opt-B (final config): the copier is pinned+niced and 1-threaded by
+     * its own spawner. Pinning the WHOLE birdcpp process to the other
+     * cores was tested and made the ORT forward SLOWER (~2.75 s vs
+     * ~1.7 s): with only 3 visible cpus the ORT thread pool loses more
+     * than the copier-park saves, so the main thread wards stay DARK.  */
     signal(SIGPIPE, SIG_IGN);
     setvbuf(stdout, NULL, _IONBF, 0);
 

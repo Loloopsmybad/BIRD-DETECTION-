@@ -1,0 +1,9 @@
+# Bird detection dataset (local YOLO layout) - used by training/tools and
+# the OPTION-A accuracy comparison (cpp/trial-a/README.txt).
+# 950 images total: 760 train / 190 val, single class "bird".
+path: D:/samsung/BIRD-DETECTION/training/data_detection
+train: train/images
+val: val/images
+
+names:
+  0: bird
