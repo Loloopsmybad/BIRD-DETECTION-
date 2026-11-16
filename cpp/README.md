@@ -96,6 +96,28 @@ Options: `-p PORT` (default 8888), `-m /path/best.onnx`, `--tjtest`,
 clean view** - `/meta.json`, `/phone` (same keys incl.
 want/ctl/line_us/preview), `/camera-set` POST+GET -> 303, `/ping`.
 
+### Model toggle (dashboard, since 2026-11-16)
+
+`/model` GET -> JSON: `{current, current_path, img, switching, err,
+models:[{name, path, bytes, current?}]}` — `models` is every
+`*.onnx` in `/home/root/birdcpp` + `/home/root/birdcpp-scratch`
+(sorted by name).
+
+`/model-set?model=X` GET (preferred; the POST form field caps at 23
+chars) -> `{ok, switching_to}` and queues the switch, which the
+infer thread executes between cycles: ORT session rebuild (~1-2 s,
+detections pause briefly), letterbox **auto-adapts** to the model's
+static input size (square, multiple of 32, 320..640; anything else
+fails the load), then detections resume. `X` is a basename (searched
+in both model dirs) or an absolute `.onnx` path. Bad targets answer
+`400 {ok:false, err:...}`; a failed load rolls back to the previous
+model and surfaces the error on `/model` `err` + dashboard.
+
+The choice persists per port to `/home/root/birdcpp/model_sel_<port>.txt`
+(wins over the unit `-m` on restart; 8888 and 8890 are independent so
+the sandbox can never move production). Delete the file to return to
+the unit default. `/phone` gained `"model": {name, img, switching}`.
+
 Gone (the point of the design): `/frame.jpg`, `/det.jpg`,
 `/live_det.jpg`, `/snapshot.jpg` and friends answer **410** with a
 one-line JSON explanation. Capture runs only while a `/stream`

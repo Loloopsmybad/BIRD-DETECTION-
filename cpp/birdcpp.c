@@ -63,6 +63,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <dirent.h>                   /* /model endpoint: scan model dirs */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -267,6 +268,11 @@ static int ORT_IMG = 640;
 #define MAX_DETS        64
 #define DET_IDLE_S      15.0           /* s a det frame stays "fresh"   */
 
+/* model toggle (dashboard switch): candidates scanned from these dirs,
+ * choice persisted per port so a restart keeps the last pick            */
+#define SCRATCH_DIR     "/home/root/birdcpp-scratch"
+static char sel_file[280] = "";        /* e.g. model_sel_8888.txt      */
+
 #define NOTE_MAX 220
 
 #define NMODES 3
@@ -383,6 +389,12 @@ static state_t G;
 static const char *opt_model = NULL;      /* -m override, else static */
 static const char *opt_ortlib = NULL;     /* --ortlib override        */
 static int opt_ortthreads = 4;            /* --ort-threads            */
+
+/* dashboard model toggle state (infer thread writes, HTTP routes read) */
+static char cur_model[256] = "";          /* model the session holds     */
+static char pend_model[256] = "";         /* requested switch target     */
+static int pend_switch = 0;               /* 1 = switch at next cycle    */
+static char switch_err[192] = "";         /* last switch failure text    */
 
 static void g_lock(void)   { pthread_mutex_lock(&G.mu); }
 static void g_unlock(void) { pthread_mutex_unlock(&G.mu); }
@@ -1679,8 +1691,56 @@ static int ort_init(const char *model_path, char *err, size_t errcap)
     ORTCHK(OAPI->CreateSession(oenv, model_path, oopts, &osess));
     double create_ms = (now_sec() - t0) * 1000.0;
 
+    /* adapt the letterbox to the model's static input size (models are
+     * exported 1x3xHxW, H==W). Dynamic models keep the running ORT_IMG.
+     * A static size outside 320..640 (multiple of 32) fails the load.  */
+    {
+        OrtTypeInfo *ti = NULL;
+        OrtStatus *stq = OAPI->SessionGetInputTypeInfo(osess, 0, &ti);
+        if (stq) {
+            OAPI->ReleaseStatus(stq);    /* keep current letterbox */
+        } else if (ti) {
+            const OrtTensorTypeAndShapeInfo *tsi = NULL;
+            if (OAPI->CastTypeInfoToTensorInfo(ti, &tsi) == NULL && tsi) {
+                size_t nd = 0;
+                int64_t dims[4] = { 0, 0, 0, 0 };
+                if (OAPI->GetDimensionsCount(tsi, &nd) == NULL && nd == 4 &&
+                    OAPI->GetDimensions(tsi, dims, nd) == NULL &&
+                    dims[2] > 0 && dims[2] == dims[3]) {
+                    int64_t h = dims[2];
+                    if (h >= 320 && h <= 640 && h % 32 == 0) {
+                        if ((int)h != ORT_IMG) {
+                            logf_("ort: model static input %lld - letterbox "
+                                  "%d -> %lld", (long long)h, ORT_IMG,
+                                  (long long)h);
+                            ORT_IMG = (int)h;
+                        }
+                    } else {
+                        OAPI->ReleaseTypeInfo(ti);
+                        snprintf(err, errcap,
+                                 "model static input %lld unsupported "
+                                 "(need square, multiple of 32, 320..640)",
+                                 (long long)h);
+                        return -1;
+                    }
+                }
+            }
+            OAPI->ReleaseTypeInfo(ti);
+        }
+    }
+
     OrtAllocator *alloc = NULL;
     ORTCHK(OAPI->GetAllocatorWithDefaultOptions(&alloc));
+    if (oin_name) {
+        OrtStatus *stf = OAPI->AllocatorFree(alloc, oin_name);
+        if (stf) OAPI->ReleaseStatus(stf);
+        oin_name = NULL;
+    }
+    if (oout_name) {
+        OrtStatus *stf = OAPI->AllocatorFree(alloc, oout_name);
+        if (stf) OAPI->ReleaseStatus(stf);
+        oout_name = NULL;
+    }
     ORTCHK(OAPI->SessionGetInputName(osess, 0, alloc, &oin_name));
     ORTCHK(OAPI->SessionGetOutputName(osess, 0, alloc, &oout_name));
 
@@ -1692,12 +1752,13 @@ static int ort_init(const char *model_path, char *err, size_t errcap)
     oin_buf = (float *)xmalloc(nb);
     for (long long i = 0; i < (long long)(nb / sizeof(float)); i++)
         oin_buf[i] = 0.45f;
+    if (oinval) { OAPI->ReleaseValue(oinval); oinval = NULL; }
     ORTCHK(OAPI->CreateTensorWithDataAsOrtValue(
         omi, (void *)oin_buf, nb, indims, 4,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &oinval));
 
-    logf_("ort: %s  session %.0f ms (threads=%d)", model_path,
-          create_ms, oithreads);
+    logf_("ort: %s  session %.0f ms (threads=%d, img=%d)", model_path,
+          create_ms, oithreads, ORT_IMG);
     return 0;
 }
 
@@ -1705,6 +1766,7 @@ static int ort_init(const char *model_path, char *err, size_t errcap)
  * ort state for letterbox
  * ------------------------------------------------------------------ */
 static unsigned char *ocanvas;           /* ORT_IMG*ORT_IMG*3  u8        */
+static int ocanvas_alloc = 0;
 static float olr;
 static int oltop, olleft, olw, olh;      /* src (view) geometry          */
 
@@ -1717,8 +1779,11 @@ static float ort_min_r(int h, int w)
 
 static void ort_letterbox(const unsigned char *bgr, int w, int h)
 {
-    if (!ocanvas)
+    if (!ocanvas || ocanvas_alloc != ORT_IMG) {
+        free(ocanvas);
         ocanvas = (unsigned char *)xmalloc((size_t)ORT_IMG * ORT_IMG * 3);
+        ocanvas_alloc = ORT_IMG;
+    }
     unsigned char *cv = ocanvas;
     olr = ort_min_r(h, w);
     int nh = (int)rintf((float)h * olr);
@@ -2031,14 +2096,169 @@ static void *gate_thread(void *unused)
 }
 
 /* ------------------------------------------------------------------ *
+ * model toggle: persistence, resolution, scan, /model JSON
+ * ------------------------------------------------------------------ */
+static void json_escape_sb(sbuf *b, const char *s);   /* defined below */
+
+static void model_persist(const char *path)
+{
+    if (!sel_file[0]) return;
+    char tmp[320];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", sel_file);
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        logf_("model: persist failed (%s)", tmp);
+        return;
+    }
+    fprintf(f, "%s\n", path);
+    fclose(f);
+    if (rename(tmp, sel_file) != 0)
+        logf_("model: persist rename failed (%s)", sel_file);
+}
+
+/* accept a dashboard-provided model id: a basename found in one of the
+ * model dirs, or an absolute path to a readable .onnx                  */
+static int model_resolve(const char *name, char *out, size_t cap,
+                         char *err, size_t errcap)
+{
+    if (!name || !name[0]) {
+        snprintf(err, errcap, "no model given");
+        return -1;
+    }
+    if (name[0] == '/') {
+        size_t l = strlen(name);
+        if (l < 6 || strcmp(name + l - 5, ".onnx") != 0) {
+            snprintf(err, errcap, "not a .onnx path");
+            return -1;
+        }
+        if (l >= cap || access(name, R_OK) != 0) {
+            snprintf(err, errcap, "file not found or not readable");
+            return -1;
+        }
+        snprintf(out, cap, "%s", name);
+        return 0;
+    }
+    const char *const dirs[2] = { HOME_BIRDCPP, SCRATCH_DIR };
+    for (int i = 0; i < 2; i++) {
+        char pth[256];
+        snprintf(pth, sizeof(pth), "%s/%s", dirs[i], name);
+        struct stat st;
+        if (stat(pth, &st) == 0 && S_ISREG(st.st_mode) &&
+            access(pth, R_OK) == 0) {
+            snprintf(out, cap, "%s", pth);
+            return 0;
+        }
+    }
+    snprintf(err, errcap,
+             "model not found in %s or %s", HOME_BIRDCPP, SCRATCH_DIR);
+    return -1;
+}
+
+/* scan one model dir; emit JSON entries, marking the active full path  */
+static void model_scan_dir(const char *dir, const char *cur_path,
+                           int *first, sbuf *b)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    char names[24][64];
+    long sizes[24];
+    int n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < 24) {
+        size_t l = strlen(e->d_name);
+        if (l < 6 || l > 63) continue;
+        if (strcmp(e->d_name + l - 5, ".onnx") != 0) continue;
+        char pth[256];
+        snprintf(pth, sizeof(pth), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(pth, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        snprintf(names[n], sizeof(names[n]), "%s", e->d_name);
+        sizes[n] = (long)st.st_size;
+        n++;
+    }
+    closedir(d);
+    for (int i = 1; i < n; i++)          /* insertion sort by name */
+        for (int j = i; j > 0 && strcmp(names[j - 1], names[j]) > 0; j--) {
+            char tn[64];
+            long ts;
+            memcpy(tn, names[j - 1], sizeof(tn));
+            memcpy(names[j - 1], names[j], sizeof(tn));
+            memcpy(names[j], tn, sizeof(tn));
+            ts = sizes[j - 1]; sizes[j - 1] = sizes[j]; sizes[j] = ts;
+        }
+    for (int i = 0; i < n; i++) {
+        char pth[256];
+        snprintf(pth, sizeof(pth), "%s/%s", dir, names[i]);
+        if (!*first) sb_app(b, ", ");
+        *first = 0;
+        sb_appf(b, "{\"name\": \"%s\", \"path\": \"%s\", \"bytes\": %ld%s}",
+                names[i], pth, sizes[i],
+                strcmp(pth, cur_path) == 0 ? ", \"current\": true" : "");
+    }
+}
+
+static void model_json(sbuf *b)
+{
+    char cur[256], serr[192];
+    int psw, img;
+    g_lock();
+    snprintf(cur, sizeof(cur), "%s", cur_model);
+    psw = pend_switch;
+    img = ORT_IMG;
+    memcpy(serr, switch_err, sizeof(serr));
+    g_unlock();
+    if (!cur[0])
+        snprintf(cur, sizeof(cur), "%s",
+                 opt_model ? opt_model : MODEL_PATH);
+    const char *cb = strrchr(cur, '/');
+    sb_appf(b, "{\"current\": \"%s\", \"current_path\": \"%s\", "
+               "\"img\": %d, \"switching\": %s, \"err\": \"",
+            cb ? cb + 1 : cur, cur, img, psw ? "true" : "false");
+    json_escape_sb(b, serr);
+    sb_app(b, "\", \"models\": [");
+    int first = 1;
+    model_scan_dir(HOME_BIRDCPP, cur, &first, b);
+    model_scan_dir(SCRATCH_DIR, cur, &first, b);
+    sb_app(b, "]}");
+}
+
+/* ------------------------------------------------------------------ *
  * inference thread (native ORT)
  * ------------------------------------------------------------------ */
 static void *infer_thread(void *unused)
 {
     (void)unused;
-    const char *model = opt_model ? opt_model : MODEL_PATH;
-    if (access(model, R_OK) != 0)
-        model = HOME_ROOTBIRD "/best.onnx";
+    /* startup model: -m arg (or the 640 default), with the legacy
+     * fallback; a persisted dashboard choice (model_sel_<port>.txt)
+     * wins if it points at a readable file                          */
+    const char *cand = opt_model ? opt_model : MODEL_PATH;
+    if (access(cand, R_OK) != 0)
+        cand = HOME_ROOTBIRD "/best.onnx";
+    g_lock();
+    snprintf(cur_model, sizeof(cur_model), "%s", cand);
+    g_unlock();
+    if (sel_file[0]) {
+        FILE *f = fopen(sel_file, "r");
+        if (f) {
+            char line[256];
+            if (fgets(line, sizeof(line), f)) {
+                size_t l = strlen(line);
+                while (l && (line[l - 1] == '\n' || line[l - 1] == '\r' ||
+                             line[l - 1] == ' '))
+                    line[--l] = 0;
+                if (l > 5 && l < sizeof(cur_model) &&
+                    !strcmp(line + l - 5, ".onnx") &&
+                    access(line, R_OK) == 0) {
+                    g_lock();
+                    snprintf(cur_model, sizeof(cur_model), "%s", line);
+                    g_unlock();
+                    logf_("model: startup override %s -> %s", sel_file, line);
+                }
+            }
+            fclose(f);
+        }
+    }
+    logf_("model: startup %s (letterbox %d)", cur_model, ORT_IMG);
 
     char err[160];
     int ready = 0;
@@ -2051,9 +2271,64 @@ static void *infer_thread(void *unused)
             usleep(1500 * 1000);
             continue;
         }
+
+        /* dashboard model switch requested? (handled here: only this
+         * thread ever touches the ORT session)                        */
+        g_lock();
+        int psw = pend_switch;
+        char tgt[256];
+        if (psw) {
+            snprintf(tgt, sizeof(tgt), "%s", pend_model);
+            pend_switch = 0;
+            pend_model[0] = 0;
+        }
+        g_unlock();
+        if (psw) {
+            const char *b_ = strrchr(tgt, '/');
+            char base[96];
+            snprintf(base, sizeof(base), "%s", b_ ? b_ + 1 : tgt);
+            if (access(tgt, R_OK) == 0) {
+                char prev[256];
+                g_lock();
+                snprintf(prev, sizeof(prev), "%s", cur_model);
+                g_unlock();
+                logf_("model: switching %s -> %s", prev, base);
+                if (ort_init(tgt, err, sizeof(err)) == 0) {
+                    g_lock();
+                    snprintf(cur_model, sizeof(cur_model), "%s", tgt);
+                    switch_err[0] = 0;
+                    g_unlock();
+                    model_persist(tgt);
+                    logf_("model: active %s (letterbox %d)", base, ORT_IMG);
+                } else {
+                    char m[240];
+                    snprintf(m, sizeof(m), "switch to %s failed: %s", base,
+                             err);
+                    g_lock();
+                    snprintf(switch_err, sizeof(switch_err), "%s", m);
+                    g_unlock();
+                    set_meta_error(m);
+                    logf_("model: switch failed - rollback to %s", prev);
+                    if (ort_init(prev, err, sizeof(err)) != 0)
+                        ready = 0;       /* loop retries at next cycle */
+                }
+            } else {
+                char m[240];
+                snprintf(m, sizeof(m), "model file not readable: %s", tgt);
+                g_lock();
+                snprintf(switch_err, sizeof(switch_err), "%s", m);
+                g_unlock();
+                set_meta_error(m);
+                logf_("model: %s", m);
+            }
+            continue;
+        }
+
         if (!ready) {
-            if (ort_init(model, err, sizeof(err)) != 0) {
-                set_meta_error(err);
+            if (ort_init(cur_model, err, sizeof(err)) != 0) {
+                char m[240];
+                snprintf(m, sizeof(m), "ort init: %s", err);
+                set_meta_error(m);
                 usleep(3000 * 1000);
                 continue;
             }
@@ -2202,6 +2477,29 @@ static int parse_form(char *body, struct field *F, int maxf)
         nf++;
     }
     return nf;
+}
+
+/* pull one key out of a query string ("a=1&model=x.onnx") */
+static int query_param(const char *q, const char *key, char *out, size_t cap)
+{
+    if (!q || !key) return 0;
+    size_t kl = strlen(key);
+    const char *p = q;
+    while ((p = strstr(p, key)) != NULL) {
+        if ((p == q || p[-1] == '&') && p[kl] == '=') {
+            char val[256];
+            size_t i = 0;
+            p += kl + 1;
+            while (*p && *p != '&' && i < sizeof(val) - 1)
+                val[i++] = *p++;
+            val[i] = 0;
+            url_decode(val);
+            snprintf(out, cap, "%s", val);
+            return 1;
+        }
+        p++;
+    }
+    return 0;
 }
 
 static const char *field_get(struct field *F, int nf, const char *k)
@@ -2433,6 +2731,19 @@ static void phone_json(sbuf *b)
             dstg.snap, dstg.letterbox, dstg.fwd, dstg.parse, dstg.nms,
             dstg.cycle);
     sb_appf(b, ", \"backend\": \"%s\", \"fps\": %.2f", backend, fps);
+    {
+        char cm[256];
+        const char *cb;
+        g_lock();
+        snprintf(cm, sizeof(cm), "%s", cur_model);
+        int psw = pend_switch;
+        g_unlock();
+        cb = strrchr(cm, '/');
+        sb_appf(b, ", \"model\": {\"name\": \"%s\", \"img\": %d, "
+                   "\"switching\": %s}",
+                cm[0] ? (cb ? cb + 1 : cm) : "?", ORT_IMG,
+                psw ? "true" : "false");
+    }
     sb_appf(b, ", \"wb\": %d, \"gamma\": %d", wb, gamma);
     sb_appf(b, ", \"mode\": \"%s\", \"scale\": \"%s\"", MODE_NM[modei],
             SCALE_LABEL[scale]);
@@ -2618,6 +2929,17 @@ static void page_html(sbuf *b)
               "   <button type=\"submit\">apply camera settings</button>\n"
               "  </form>\n"
               " </div>\n"
+              " <div class=\"card\"><h3>Model</h3>\n"
+              "  <div id=\"modelstat\">loading model list...</div>\n"
+              "  <select id=\"modelsel\" style=\"margin:6px 0;width:95%\""
+              "></select>\n"
+              "  <button id=\"msw\">switch</button>\n"
+              "  <div class=\"hc\">switch rebuilds the runtime session"
+              " (~1-2 s, detections pause briefly); the letterbox follows"
+              " the model's input size automatically. The choice persists"
+              " across restarts (per-port model_sel file); removing that"
+              " file returns the unit's -m default.</div>\n"
+              " </div>\n"
               " <div class=\"card\"><h3>Pages on this server</h3>\n"
               "  <ul class=\"links\">\n"
               "   <li><a href=\"/stream\">/stream</a> - live MJPEG feed (a"
@@ -2688,6 +3010,45 @@ static void page_html(sbuf *b)
               "cal_blanking:j.want.vertical_blanking)+\n"
               "      (j.line_us!=null?(' | line '+j.line_us+' us'):'');\n"
               "  }).catch(function(){});\n},2000);\n"
+              "var msel=document.getElementById('modelsel'),\n"
+              "    mstat=document.getElementById('modelstat');\n"
+              "var mopts='',mcur='',mimg=0,msw=0;\n"
+              "function modelPoll(){\n"
+              " fetch('/model',{cache:'no-store'}).then(function(r){return"
+              " r.json();}).then(function(j){\n"
+              "  var opts='';(j.models||[]).forEach(function(m){\n"
+              "   opts+='<option value=\"'+m.path+'\"'+(m.current?"
+              "' selected':'')+'>'+m.name+' - '+(Math.round(m.bytes/10485"
+              "76*10)/10)+' MB</option>';\n"
+              "  });\n"
+              "  if(opts!==mopts){mopts=opts;msel.innerHTML=opts;}\n"
+              "  if(document.activeElement!==msel)"
+              " msel.value=j.current_path||'';\n"
+              "  mcur=j.current_path||'';mimg=j.img||0;msw=j.switching;\n"
+              "  mstat.innerHTML='active: <b>'+(j.current||'-')+'</b>"
+              " @ '+mimg+'px'+(j.switching?\n"
+              "   ' &middot; <span style=\"color:#e6a23c\">switching..."
+              "</span>':'')+\n"
+              "   (j.err?' &middot; <span style=\"color:#e67e22\">'+j.err"
+              "+'</span>':'');\n"
+              " }).catch(function(){});\n"
+              "}\n"
+              "setInterval(modelPoll,2000);modelPoll();\n"
+              "function modelApply(){\n"
+              " var v=msel.value;if(!v)return;\n"
+              " if(v===mcur&&!msw){mstat.innerHTML='active: <b>'+"
+              "(mcur.split('/').pop())+'</b> (already active)';return;}\n"
+              " mstat.textContent='switching to '+v.split('/').pop()+' ..."
+              "';\n"
+              " fetch('/model-set?model='+encodeURIComponent(v),{cache:"
+              "'no-store'}).then(function(r){return r.json();})\n"
+              "  .then(function(j){if(!j.ok)mstat.textContent='switch"
+              " failed: '+(j.err||'?');modelPoll();})\n"
+              "  .catch(function(){mstat.textContent='switch request"
+              " failed';});\n"
+              "}\n"
+              "document.getElementById('msw').onclick=modelApply;\n"
+              "msel.onchange=modelApply;\n"
               "</script></body></html>");
 }
 
@@ -2831,6 +3192,52 @@ static void route_worker(int fd, const char *path, const char *query,
         int nf = parse_form(body ? body : (char *)"", F, 24);
         apply_camera_set(F, nf);
         emit_303(fd);
+        return;
+    }
+    if (!strcmp(path, "/model")) {
+        sbuf b;
+        sb_init(&b);
+        model_json(&b);
+        emit_str(fd, 200, "application/json", b.b);
+        sb_free(&b);
+        return;
+    }
+    if (!strcmp(path, "/model-set")) {
+        gate_mark_activity();            /* keep the pipeline up for it  */
+        char name[256] = "";
+        char qname[256] = "";
+        if (query_param(query, "model", qname, sizeof(qname)))
+            snprintf(name, sizeof(name), "%s", qname);
+        else {
+            struct field F[8];
+            int nf = parse_form(body ? body : (char *)"", F, 8);
+            const char *v = field_get(F, nf, "model");
+            if (v) snprintf(name, sizeof(name), "%s", v);
+        }
+        char tgt[256], merr[128];
+        if (model_resolve(name, tgt, sizeof(tgt), merr, sizeof(merr)) == 0) {
+            g_lock();
+            snprintf(pend_model, sizeof(pend_model), "%s", tgt);
+            pend_switch = 1;
+            g_unlock();
+            const char *b_ = strrchr(tgt, '/');
+            sbuf b;
+            sb_init(&b);
+            sb_app(&b, "{\"ok\": true, \"switching_to\": \"");
+            json_escape_sb(&b, b_ ? b_ + 1 : tgt);
+            sb_app(&b, "\"}");
+            emit_str(fd, 200, "application/json", b.b);
+            sb_free(&b);
+            logf_("model: switch requested -> %s", tgt);
+        } else {
+            sbuf b;
+            sb_init(&b);
+            sb_app(&b, "{\"ok\": false, \"err\": \"");
+            json_escape_sb(&b, merr);
+            sb_app(&b, "\"}");
+            emit_str(fd, 400, "application/json", b.b);
+            sb_free(&b);
+        }
         return;
     }
     emit_str(fd, 404, "application/json", "{\"err\":\"unknown endpoint\"}");
@@ -3030,6 +3437,11 @@ int main(int argc, char **argv)
         logf_("bad --img %d (must be a multiple of 32 in 320..640)", ORT_IMG);
         return 2;
     }
+
+    /* dashboard model toggle: per-port persistence (8888 and 8890 keep
+     * independent choices so the sandbox cannot move production)       */
+    snprintf(sel_file, sizeof(sel_file), HOME_BIRDCPP "/model_sel_%d.txt",
+             port);
 
     /* opt-B (final config): the copier is pinned+niced and 1-threaded by
      * its own spawner. Pinning the WHOLE birdcpp process to the other

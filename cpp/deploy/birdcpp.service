@@ -20,7 +20,13 @@ ExecStart=/home/root/birdcpp/birdcpp -p 8888 -m /home/root/birdcpp/best_448.onnx
 #                       balanced pick (~790-1190 ms cycles, mAP50 0.806)
 #   best_384.onnx 384 - speed-first: ran on :8888 briefly (~720 ms cycles,
 #                       mAP50 0.767, recalls ~6% fewer birds than 448)
-# to switch: change BOTH the -m file and --img (must match the export):
+# switching (since 2026-11-16): the dashboard has a live model toggle
+#   (/model + /model-set endpoints) - no unit edit needed for a switch.
+#   -m/--img here is only the BOOT default; a dashboard choice is persisted
+#   to /home/root/birdcpp/model_sel_8888.txt and wins until that file is
+#   removed. The letterbox auto-follows the model's static input size.
+#   candidates: /home/root/birdcpp/*.onnx + /home/root/birdcpp-scratch/*.onnx
+# manual fallback (restart required):
 #   ExecStart=/home/root/birdcpp/birdcpp -p 8888 -m /home/root/birdcpp/best_448.onnx --img 448
 #   ExecStart=/home/root/birdcpp/birdcpp -p 8888                (640 default)
 Restart=on-failure
