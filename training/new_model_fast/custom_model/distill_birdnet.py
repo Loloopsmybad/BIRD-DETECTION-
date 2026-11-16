@@ -270,6 +270,42 @@ def main():
 
     model.add_callback("on_train_epoch_start", on_epoch)
 
+    # anti-recycle insurance: periodically copy checkpoints to Drive so a
+    # VM recycle loses at most one interval of progress (d2 lesson)
+    run_dir = f"/content/birdnet_runs/{args.name}"
+    ckpt_dst = f"/content/drive/MyDrive/BIRD/{args.name}_ckpts"
+
+    def ckpt_backup():
+        import shutil as sh
+        import threading
+        seen = -1
+        while True:
+            time.sleep(900)  # 15 min
+            if not os.path.isdir("/content/drive/MyDrive"):
+                continue
+            try:
+                os.makedirs(ckpt_dst, exist_ok=True)
+                csv = os.path.join(run_dir, "results.csv")
+                if os.path.exists(csv):
+                    rows = len(open(csv).read().strip().splitlines())
+                    if rows == seen:
+                        continue  # no new epoch since last copy
+                    seen = rows
+                    sh.copy2(csv, os.path.join(ckpt_dst, "results.csv"))
+                for w in ("best.pt", "last.pt"):
+                    p = os.path.join(run_dir, "weights", w)
+                    if os.path.exists(p):
+                        tmp = os.path.join(ckpt_dst, w + ".tmp")
+                        sh.copy2(p, tmp)
+                        os.replace(tmp, os.path.join(ckpt_dst, w))
+                LOG(f"ckpt backup -> Drive (epoch row {seen})")
+            except Exception as e:
+                LOG("ckpt backup skipped:", e)
+
+    import threading
+    threading.Thread(target=ckpt_backup, daemon=True).start()
+    LOG("checkpoint backup thread armed (15 min interval, Drive)")
+
     LOG(f"starting training: epochs={args.epochs} imgsz={args.imgsz} batch={args.batch}")
     model.train(
         data="/content/bird_data.yaml",
