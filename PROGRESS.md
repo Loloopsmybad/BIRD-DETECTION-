@@ -35,6 +35,13 @@ session wrote it. Keep entries as terse facts with paths/numbers.
   15-min ckpt backup thread).
 - Board now has a 7-model dropdown: best 640 / best_384 / best_448 (prod) /
   scratch best_448 / birdnet_v1 / birdnet_v1-int8 / birdnet_d1-int8.
+- **User already exercised the toggle**: journal shows manual switches to
+  `birdnet_v1_int8_448.onnx` at 18:31:27/29 (2026-11-16) → production has
+  been running v1-int8 (cycle ~420-600, det_pubs climbing) by user choice
+  since the deploy; `model_sel_8888.txt` now persists that pick. Note for
+  tomorrow's decision: v1-int8 is the *least* accurate INT8 candidate
+  (0.612) — d1-int8 (0.651) is the best fast one, best_448 (0.806) the
+  accuracy anchor.
 - Next: d2 relaunch (check `torch.cuda.is_available()` FIRST — pip on the
   fresh VM downgraded CUDA torch); final model choice is a user call via
   the new toggle.
