@@ -5,6 +5,21 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
+## 2026-11-16 — kickoff extras (agent: gentle-wizard, build)
+
+- **Obsidian notes written** (user's standing request):
+  `Project Logs/Bird Detector From Scratch.md` (live diary with production
+  numbers + kickoff entry) + concept notes `Object Detection.md`,
+  `Training From Scratch vs Fine-Tuning.md`, `Knowledge Distillation.md`,
+  `Quantization.md`; index `Artificial Intelligence.md` updated with all
+  links. Style follows the vault conventions from session `cosmic-lagoon`.
+- `bird.ipynb` validated (JSON parses, 11 cells).
+- Waiting on: user to Run-all `training/new_model_fast/bird.ipynb` on
+  Colab T4 → results land in `MyDrive/BIRD/scratch_v1/`. After that:
+  distillation data + custom model design phase.
+
+---
+
 ## 2026-11-16 — new_model_fast project kickoff (agent: gentle-wizard, build)
 
 - **Board stopped & verified clean** (user request, pre-model work):
