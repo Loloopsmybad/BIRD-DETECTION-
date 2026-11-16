@@ -153,6 +153,8 @@ def main():
         exist_ok=True,
         seed=0,
         save_period=50,
+        amp=False,  # check_amp() builds a stock yolo26n.yaml, which our
+                    # monkey-patch would corrupt -> skip AMP entirely
     )
     LOG("training done")
 
