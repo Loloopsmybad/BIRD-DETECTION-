@@ -5,6 +5,31 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
+## 2026-11-16 — board trial #4 (d1-int8): ~3× faster than prod; Colab VM recycled, d2 lost (agent: gentle-wizard, build)
+
+- **Board trial #4 — birdnet_d1 INT8 on the real camera (sandbox :8890,
+  production paused)**: fwd **239-421 ms**, cycle **283-452 ms** across 4
+  samples (3 of 4 ≤ 350 ms goal; one 283). det_pubs climbing 113→319
+  (detections healthy). **~3× faster than production** (fwd ~875 / cycle
+  ~915). Production restored + verified LIVE after the trial.
+- Trial protocol notes: model staged at
+  `/home/root/birdcpp-scratch/birdnet_d1_int8_448.onnx`, sandbox unit
+  `birdcpp-scratch.service` `-m` sed-swapped and reverted after.
+- **Colab VM RECYCLED mid-d2** (free tier idle disconnect while the browser
+  tab sat in background): `/content` wiped — birdnet scripts,
+  `/content/data_detection` copy, and the **birdnet_d2 checkpoints LOST**
+  (save_period=50 ckpts were /content-only; the Drive copy happens only at
+  run end). Drive unmounted (`drive.mount` fails "ValueError mount failed"
+  without user click; from a subprocess it can't work — AttributeError
+  get_kernelapp). Old tunnel URL dead, cloudflared/http.server gone.
+- **Unaffected**: d1 artifacts (repo + Drive), d1-int8 champion
+  (0.651 @448, 1.47 MB). d2 must be relaunched from scratch once Drive is
+  mounted. Lesson: copy checkpoints to Drive periodically mid-run; keep
+  Colab tab foregrounded while training.
+- **Blocked on user**: click "Mount Drive" in the Colab tab.
+
+---
+
 ## 2026-11-16 — distillation run d1 DONE: +0.029 mAP50, matches full-size scratch baseline (agent: gentle-wizard, build)
 
 - **birdnet_d1 complete** (250 ep requested, early stop at 177, 0.51 h T4,
