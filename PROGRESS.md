@@ -27,6 +27,22 @@ session wrote it. Keep entries as terse facts with paths/numbers.
   mounted. Lesson: copy checkpoints to Drive periodically mid-run; keep
   Colab tab foregrounded while training.
 - **Blocked on user**: click "Mount Drive" in the Colab tab.
+- **Recovery prep DONE (same day)**: fresh VM re-staged over the new
+  tunnel **`https://opponent-textile-powell-cure.trycloudflare.com`** —
+  `/content/birdnet/` re-populated from repo sources via %%writefile
+  (birdnet.py 185 lines, distill_birdnet.py 391 lines with a NEW 15-min
+  checkpoint-backup-to-Drive thread, both yamls; all syntax-verified,
+  `--yaml` count == 1), http.server + cloudflared restarted (URL above).
+  One-shot relaunch cell armed in the notebook: checks mount, verifies
+  dataset + teacher on Drive, launches
+  `distill_birdnet.py --yaml birdnet_v2.yaml --name birdnet_d2 --epochs
+  250 --from-scratch` detached. **d2 = one click + one cell re-run away.**
+- New colab gotchas: `python` is not on PATH on the fresh image (only
+  `python3`); `pgrep -f "x || (launch x)"` self-matches even with the
+  bracket trick because the target command text sits in the same `sh -c`
+  cmdline → use `subprocess.Popen([...], start_new_session=True)` +
+  socket port probe instead of shell guards; cloudflared must be
+  re-downloaded on a fresh VM (releases/latest/download/cloudflared-linux-amd64).
 
 ---
 
