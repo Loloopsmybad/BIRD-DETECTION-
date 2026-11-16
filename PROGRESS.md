@@ -5,6 +5,42 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
+## 2026-11-17 — dashboard model toggle shipped to production (agent: gentle-wizard, build)
+
+- **Feature: live model switch in the birdcpp web UI** (no restart, no ssh).
+  `cpp/birdcpp.c` +449/-9: `/model` GET (JSON list of every `*.onnx` in
+  `/home/root/birdcpp` + `/home/root/birdcpp-scratch`), `/model-set?model=`
+  (GET preferred; POST form field caps at 23 chars), dashboard Model card
+  (dropdown + auto-refresh 2 s), `/phone` gained
+  `"model": {name, img, switching}`.
+- Design: switch executes **inside the infer thread only** (single owner of
+  the ORT session); HTTP route just sets `pend_switch` under `g_lock`.
+  Letterbox **auto-adapts** to the model's static input shape (square,
+  multiple of 32, 320..640 → e.g. 640→448→640 verified; out-of-range static
+  size fails the load). Failed load rolls back to the previous model.
+- Persistence: per-port `HOME_BIRDCPP/model_sel_<port>.txt` (8888 vs 8890
+  independent); persisted choice wins over unit `-m` at startup; deleting
+  the file returns to the unit default.
+- **Sandbox live test PASSED** (:8890, prod paused): cycle 1137 (V8@448) →
+  switch → **d1-int8 cycle 343** → best.onnx@640 cycle 1577 (letterbox grew
+  back) → best_448 (669) → bad model `400 {"ok":false}` → restart kept the
+  persisted choice → prod restored.
+- **Production deployed** (:8888): binary 74,512 → 83,432 bytes, backup
+  `/home/root/birdcpp/birdcpp_pre_toggle.bak`. Gotcha: `cp` over a running
+  exe fails "Text file busy" → stop → copy → start. Round-trip on prod
+  verified: cycle 1142 → **366 (d1-int8)** → back 1364→settles; `model_sel_8888.txt`
+  deleted → production left on `best_448.onnx` (unit `-m` governs).
+- Docs: `cpp/README.md` endpoint section + `cpp/deploy/birdcpp.service`
+  switch comments. Commits `2455094` (feature), `788c2f7` (distill runner
+  15-min ckpt backup thread).
+- Board now has a 7-model dropdown: best 640 / best_384 / best_448 (prod) /
+  scratch best_448 / birdnet_v1 / birdnet_v1-int8 / birdnet_d1-int8.
+- Next: d2 relaunch (check `torch.cuda.is_available()` FIRST — pip on the
+  fresh VM downgraded CUDA torch); final model choice is a user call via
+  the new toggle.
+
+---
+
 ## 2026-11-16 — board trial #4 (d1-int8): ~3× faster than prod; Colab VM recycled, d2 lost (agent: gentle-wizard, build)
 
 - **Board trial #4 — birdnet_d1 INT8 on the real camera (sandbox :8890,
