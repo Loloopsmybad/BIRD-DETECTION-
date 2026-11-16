@@ -5,6 +5,74 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
+## 2026-11-16 — phase ④ INT8 quantization: tooling + first PTQ numbers (agent: gentle-wizard, build)
+
+- `tools/quantize_int8.py` — onnxruntime **static PTQ** of BirdNet v1
+  best_448.onnx: calibration reader = real dataset images letterboxed
+  exactly like birdcpp (448, pad 114, BGR→RGB, /255), QOperator
+  (QLinearConv), per-channel QInt8 weights, QUInt8 activations, Conv-only
+  (graph is 67 Conv, no MatMul). Options: `--calib
+  minmax|percentile|entropy`, `--exclude-last` (keeps the cls-branch head
+  convs fp32 by walking back from the output Sigmoid through
+  Concat/Reshape), `--threads N` (desktop freeze guard).
+- `tools/val_onnx.py` — thread-capped (default 4) + below-normal-priority
+  `yolo val` wrapper. **Cause of the 2026-11-16 desktop hang: plain `yolo
+  val` on ONNX runs ORT with one intra-op thread per logical core → all
+  cores 100% for the whole run.** Always use the wrapper for local ONNX
+  val.
+- `data_bird.yaml` — fixed the stale path in the old
+  `training/V8 fine tuning/data_detection/bird_val.yaml` (pointed at
+  nonexistent `training/data_detection`).
+- PTQ scoreboard (val on PC, 191 imgs incl. one dupe `_det.jpg`, 413 inst):
+  | variant | mAP50 | mAP50-95 |
+  |---|---|---|
+  | float ONNX (PC baseline) | 0.617 | 0.381 |
+  | int8 MinMax 128 calib | 0.556 | 0.313 |
+  | int8 Percentile 99.9 256 calib | 0.585 | 0.337 |
+  | int8 MinMax 256 + exclude-last | 0.552 | 0.309 |
+  | **int8 Entropy 256 calib (WINNER)** | **0.612** | **0.375** |
+  Entropy calibration recovers essentially all float accuracy
+  (-0.005 mAP50); exclude-last did not help (cls head convs weren't the
+  pain point). Winner file:
+  `checkpoints/birdnet_v1/best_448_int8_e.onnx` (1.47 MB, `(1,5,4116)`).
+- **Board trial #3 (:8890 sandbox, `birdnet_v1_int8_448.onnx`):** fwd
+  **291-464 ms**, cycle **324-506 ms**, 7.6-9.1 fps, det_pubs 112→307.
+  vs float BirdNet (692-800 ms fwd) = **~2.0-2.2x faster**; vs production
+  (~875 ms fwd) = **~2.7x faster**. Accuracy cost on board model: 0.623 →
+  0.612 mAP50 (-0.011). INT8 attacks the memory-bound bottleneck exactly
+  as predicted. Production restored + verified LIVE after the trial.
+- Scoreboard @448 now:
+  | model | params | val mAP50@448 | fwd (board) | cycle |
+  |---|---|---|---|---|
+  | prod fine-tuned V8 float | 3.0 M | 0.806 | ~875 | ~915 |
+  | BirdNet v1 float | 1.23 M | 0.623 | 692-800 | 724-834 |
+  | **BirdNet v1 INT8 entropy** | **1.23 M / 1.47 MB** | **0.612** | **291-464** | **324-506** |
+
+- Quantized size: **1.47 MB** vs 5.06 MB float; output `(1,5,4116)`
+  unchanged; smoke cos similarity 0.9996-0.9999 on real images.
+
+---
+
+## 2026-11-16 — phase ③ distillation: smoke green, full run launched (agent: gentle-wizard, build)
+
+- `custom_model/distill_birdnet.py` — response distillation for BirdNet
+  riding the stock ultralytics trainer (only `init_criterion` monkey-patched,
+  no loss-internals surgery): teacher = fine-tuned V8
+  (`/content/drive/MyDrive/BIRD/checkpoints/best.pt`, 0.806 @448, fused,
+  frozen); teacher + student (eval-mode second forward) both emit decoded
+  `(B,5,4116)` @448 → 1:1 anchor alignment; loss = teacher-score-weighted
+  SmoothL1(xywh) + MSE(score), λ=2.0 ramping in over 3 ep (cold BN stats
+  guard), supervised TAL/box/cls/DFL loss stays 100% stock. Optional warm
+  start from our own v1 artifact (still not COCO-fine-tuned).
+- **2-ep smoke GREEN** (teacher probe `(1,5,4116)`, criterion wrapped, no
+  shape-mismatch skips, val + Drive save worked).
+- **Full run `birdnet_d1` launched** (250 ep, warm start from v1, ~10 s/ep).
+- Uploads via dpaste (`C6LVG2WG7`); colab-mcp note: launching the full run
+  timed out the MCP call and the kernel went busy — treat kernel-busy as
+  "training running", use patient sleep-cells, don't re-launch blindly.
+
+---
+
 ## 2026-11-16 — board trial #2: BirdNet v1 on real camera + the memory-bound insight
 
 - BirdNet v1 training **complete** (199 ep early stop, 0.59 h T4, amp=False):

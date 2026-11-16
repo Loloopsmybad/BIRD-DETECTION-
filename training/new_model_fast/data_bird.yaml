@@ -1,0 +1,10 @@
+# Local bird dataset (YOLO layout) for PC-side val / INT8 calibration.
+# 950 images: 760 train / 190 val, single class "bird". Class id already 0.
+# NOTE: the older training/V8 fine tuning/data_detection/bird_val.yaml points
+# at a stale path (training/data_detection) - use this yaml instead.
+path: D:/samsung/BIRD-DETECTION/training/V8 fine tuning/data_detection
+train: train/images
+val: val/images
+
+names:
+  0: bird
