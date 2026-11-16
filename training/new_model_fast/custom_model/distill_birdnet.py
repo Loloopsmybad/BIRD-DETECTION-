@@ -153,6 +153,8 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--patience", type=int, default=40)
     ap.add_argument("--name", default="birdnet_d1")
+    ap.add_argument("--yaml", default="birdnet_v1.yaml",
+                    help="architecture yaml (birdnet_v2.yaml -> v2 run)")
     ap.add_argument("--teacher", default=None)
     ap.add_argument("--init", default=None, help="optional .pt warm start (our own weights)")
     ap.add_argument("--from-scratch", action="store_true", help="ignore --init default")
@@ -233,7 +235,8 @@ def main():
 
     # student ---------------------------------------------------------------
     init = args.init
-    if init is None and not args.from_scratch:
+    if init is None and not args.from_scratch and args.yaml == "birdnet_v1.yaml":
+        # warm start only makes sense for the same architecture as v1
         cands = [
             "/content/drive/MyDrive/BIRD/birdnet_v1/best.pt",
             "/content/birdnet_runs/birdnet_v1/weights/best.pt",
@@ -246,8 +249,8 @@ def main():
         # reset training state (optimizer/epochs) so this is a fresh run
         model.model.trainer = None
     else:
-        model = YOLO(os.path.join(here, "birdnet_v1.yaml"))
-        LOG("from-scratch init")
+        model = YOLO(os.path.join(here, args.yaml))
+        LOG("from-scratch init (yaml:", args.yaml + ")")
     n_layers, n_params, n_grads, flops = model.info()
     LOG(f"student: {n_layers} layers, {n_params/1e6:.2f}M params")
 

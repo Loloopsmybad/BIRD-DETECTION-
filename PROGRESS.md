@@ -5,6 +5,28 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
+## 2026-11-16 — distillation run d1 DONE: +0.029 mAP50, matches full-size scratch baseline (agent: gentle-wizard, build)
+
+- **birdnet_d1 complete** (250 ep requested, early stop at 177, 0.51 h T4,
+  warm start from v1 best.pt, λ=2.0 ramp 3): val@448 **mAP50 0.652**,
+  **mAP50-95 0.409**, P 0.662, **R 0.593** (+0.055 recall over v1).
+  vs v1: +0.029 mAP50 / +0.020 mAP50-95. **Matches the 3.0M from-scratch
+  V8 baseline (0.651) with 41% of the params.** Still -0.154 vs production
+  (0.806) — v2 + more distill rounds next.
+- Runner exported ONNX itself: `(1,5,4116)` verified. Artifacts in repo
+  `training/new_model_fast/checkpoints/birdnet_d1/`.
+- Runner updated: `--yaml` arg (v1/v2 arch selection), warm-start default
+  guarded to v1-yaml only.
+- **birdnet_v2 build-check GREEN on VM**: 155 layers, **0.606M params**
+  (49% lighter than v1), 2.66 GFLOPs @640, eval fwd @448 → `(1, 5, 4116)`.
+- **birdnet_d2 launched** (v2 from scratch + distill, same teacher, 250 ep).
+  Monitoring lesson: colab-mcp run_code_cell can stall while the kernel is
+  busy with an in-cell training; the **cloudflared tunnel is the reliable
+  monitor** (`/birdnet_runs/<name>/results.csv` grows one row per epoch).
+
+
+---
+
 ## 2026-11-16 — phase ④ INT8 quantization: tooling + first PTQ numbers (agent: gentle-wizard, build)
 
 - `tools/quantize_int8.py` — onnxruntime **static PTQ** of BirdNet v1

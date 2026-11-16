@@ -1,0 +1,31 @@
+{
+  "weights": "/content/birdnet_runs/birdnet_d1/weights/best.pt",
+  "teacher": "/content/drive/MyDrive/BIRD/checkpoints/best.pt",
+  "init": "/content/drive/MyDrive/BIRD/birdnet_v1/best.pt",
+  "lambda": 2.0,
+  "ramp": 3,
+  "precision": 0.6616,
+  "recall": 0.5932,
+  "mAP50": 0.6521,
+  "mAP50-95": 0.4089,
+  "epochs_requested": 250,
+  "imgsz": 448,
+  "batch": 32,
+  "train_images": 760,
+  "val_images": 190,
+  "params_m": 1.233,
+  "wall_hours": 0.51,
+  "onnx": "/content/birdnet_runs/birdnet_d1/weights/best.onnx",
+  "onnx_input": [
+    1,
+    3,
+    448,
+    448
+  ],
+  "onnx_output_shape": [
+    1,
+    5,
+    4116
+  ],
+  "onnx_output_ok": true
+}
