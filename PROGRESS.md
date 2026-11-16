@@ -17,6 +17,14 @@ session wrote it. Keep entries as terse facts with paths/numbers.
   `training/new_model_fast/checkpoints/birdnet_d1/`.
 - Runner updated: `--yaml` arg (v1/v2 arch selection), warm-start default
   guarded to v1-yaml only.
+- **birdnet_d1 INT8 (entropy 256, same recipe): val@448 mAP50 0.651 /
+  mAP50-95 0.402 — quantization cost only -0.001.** File
+  `checkpoints/birdnet_d1/best_448_int8_e.onnx` (1.47 MB). This is the
+  current deployable champion: 0.651 @448, 1.47 MB, board fwd same class
+  as v1-int8 (~291-464 ms) since the arch is identical.
+- Gotcha: dpaste rate-limits (429) can PARTIALLY succeed (first URL ok,
+  second fails) — a chained `curl a && curl b` leaves the VM half-updated;
+  the %%writefile route is the reliable transfer now.
 - **birdnet_v2 build-check GREEN on VM**: 155 layers, **0.606M params**
   (49% lighter than v1), 2.66 GFLOPs @640, eval fwd @448 → `(1, 5, 4116)`.
 - **birdnet_d2 launched** (v2 from scratch + distill, same teacher, 250 ep).
