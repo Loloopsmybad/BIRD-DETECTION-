@@ -16,10 +16,15 @@ Examples:
 
 import argparse
 import datetime
+import io
 import json
 import os
 import sqlite3
 import sys
+
+# Windows consoles default to cp1252 and die on unicode; force UTF-8 everywhere
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 DB = os.path.expandvars(r"%USERPROFILE%\.local\share\opencode\opencode.db")
 
@@ -79,7 +84,34 @@ def resolve_session(conn, ref):
     return None
 
 
-def text_of_content(content):
+def _flatten_tool(p):
+    """Pull a readable one-liner + optional output out of a tool part."""
+    name = p.get("name") or "tool"
+    state = p.get("state") or {}
+    inp = state.get("input") or {}
+    detail = (
+        inp.get("command")
+        or inp.get("path")
+        or inp.get("pattern")
+        or inp.get("description")
+        or inp.get("prompt")
+        or inp.get("content", "")
+    )
+    if isinstance(detail, str):
+        detail = " ".join(detail.split())
+    detail = (str(detail) or "")[:220]
+    out = ""
+    for c in state.get("content") or []:
+        if isinstance(c, dict) and c.get("type") == "text":
+            out = " ".join((c.get("text") or "").split())[:200]
+            break
+    line = f"[tool {name}] {detail}"
+    if out:
+        line += f"  -> {out}"
+    return line
+
+
+def text_of_content(content, show_tool=True):
     """Flatten a message's content list into readable text."""
     if isinstance(content, str):
         return content
@@ -87,17 +119,12 @@ def text_of_content(content):
     if isinstance(content, list):
         for p in content:
             t = p.get("type")
-            if t in ("text", "reasoning"):
+            if t == "text":
                 txt = p.get("text") or ""
-                if t == "reasoning":
-                    continue  # skip thinking by default
                 if txt:
                     chunks.append(txt)
-            elif t == "tool":
-                tool = p.get("tool") or ""
-                state = p.get("state", {})
-                title = state.get("title") or ""
-                chunks.append(f"[tool:{tool}] {title}")
+            elif t == "tool" and show_tool:
+                chunks.append(_flatten_tool(p))
     return "\n".join(chunks)
 
 
@@ -116,15 +143,14 @@ def dump_messages(conn, sid, last=0, full=False, show_tool=True):
             continue
         t = fmt_time(d.get("time", {}).get("created"))
         who = "USER" if typ == "user" else "AI"
-        txt = text_of_content(d.get("content"))
+        if typ == "user":
+            txt = (d.get("text") or "").strip()
+            files = d.get("files") or []
+            if files:
+                txt += "\n[attached: " + ", ".join(map(str, files)) + "]"
+        else:
+            txt = text_of_content(d.get("content"), show_tool=show_tool)
         if not full:
-            # compact: trim long text, drop tool spam unless --show-tool
-            lines = []
-            for ln in txt.splitlines():
-                if ln.startswith("[tool:") and not show_tool:
-                    continue
-                lines.append(ln)
-            txt = "\n".join(lines)
             if len(txt) > 1200:
                 txt = txt[:1200] + f" ...[+{len(txt)-1200} chars]"
         print(f"--- [{seq}] {who} @ {t} ---")
