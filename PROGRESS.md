@@ -43,6 +43,18 @@ session wrote it. Keep entries as terse facts with paths/numbers.
   cmdline → use `subprocess.Popen([...], start_new_session=True)` +
   socket port probe instead of shell guards; cloudflared must be
   re-downloaded on a fresh VM (releases/latest/download/cloudflared-linux-amd64).
+- **d2 attempt #2 crashed before epoch 1**: the runner's
+  `pip install ultralytics onnx...` on the fresh VM ended with a
+  **CPU-only torch** ("Torch not compiled with CUDA enabled" at first
+  .cuda() call) — pip replaced Colab's CUDA build. Then the user's free-tier
+  **GPU quota ran out** for the day. **d2 parked until tomorrow.** Fix for
+  tomorrow: check `torch.cuda.is_available()` FIRST; if a CPU torch got
+  installed, restore CUDA torch
+  (`pip install torch -U --index-url / preinstalled CUDA build`) before
+  launching; if no GPU is allocated at all, wait for quota reset.
+  Runner + scripts stay staged on the VM; tunnel
+  `opponent-textile-powell-cure.trycloudflare.com`; relaunch cell logic
+  proven (pid spawn + detached + Drive-ckpt-backup thread armed).
 
 ---
 
