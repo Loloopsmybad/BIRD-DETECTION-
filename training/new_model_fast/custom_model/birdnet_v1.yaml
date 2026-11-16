@@ -1,0 +1,46 @@
+# BirdNet v1 - single-class bird detector, ReLU-only, from scratch.
+#
+# Channel plan (hardcoded, multiples of 8/16 for NEON):
+#   backbone 16 -> 32 -> 64 (P3/8) -> 96 (P4/16) -> 128 (P5/32) + SPPF
+#   neck PAN out 64 / 96 / 128
+#   head BirdDetect: box hidden 32, cls hidden 32 (ultralytics v8n uses 16/64,
+#   with the cls branch fat even for nc=1)
+#
+# The module names below are the STANDARD ultralytics names; birdnet.register()
+# monkey-patches them to the ReLU variants in custom_model/birdnet.py before
+# the model is built. Export stays stock -> ONNX (1, 5, N) which is exactly
+# what cpp/birdcpp.c decodes (cx, cy, w, h in letterbox px + one score).
+#
+# At imgsz 448: strides 8/16/32 -> N = 56^2 + 28^2 + 14^2 = 4116 (birdcpp cap 8400).
+
+nc: 1
+depth_multiple: 1.0
+width_multiple: 1.0
+max_channels: 512
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [16, 3, 2]]   # 0  P1/2
+  - [-1, 1, Conv, [32, 3, 2]]   # 1  P2/4
+  - [-1, 2, C2f, [32, True]]    # 2
+  - [-1, 1, Conv, [64, 3, 2]]   # 3  P3/8
+  - [-1, 2, C2f, [64, True]]    # 4  -> P3 out (detect level 0)
+  - [-1, 1, Conv, [96, 3, 2]]   # 5  P4/16
+  - [-1, 2, C2f, [96, True]]    # 6
+  - [-1, 1, Conv, [128, 3, 2]]  # 7  P5/32
+  - [-1, 1, SPPF, [128, 5]]     # 8
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 9
+  - [[-1, 6], 1, concat, [1]]                   # 10 cat P4 (96+128=224)
+  - [-1, 2, C2f, [96]]                          # 11
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # 12
+  - [[-1, 4], 1, concat, [1]]                   # 13 cat P3 (64+128=192)
+  - [-1, 2, C2f, [64]]                          # 14 -> P3/8 out (small)
+  - [-1, 1, Conv, [64, 3, 2]]                   # 15
+  - [[-1, 11], 1, concat, [1]]                  # 16 cat (64+96=160)
+  - [-1, 2, C2f, [96]]                          # 17 -> P4/16 out (medium)
+  - [-1, 1, Conv, [96, 3, 2]]                   # 18
+  - [[-1, 8], 1, concat, [1]]                   # 19 cat (96+128=224)
+  - [-1, 2, C2f, [128]]                         # 20 -> P5/32 out (large)
+  - [[14, 17, 20], 1, Detect, [nc]]             # 21 -> BirdDetect
