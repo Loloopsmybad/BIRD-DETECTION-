@@ -5,6 +5,33 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
+## 2026-11-16 — board trial #2: BirdNet v1 on real camera + the memory-bound insight
+
+- BirdNet v1 training **complete** (199 ep early stop, 0.59 h T4, amp=False):
+  val@448 mAP50 **0.623**, mAP50-95 0.389, P 0.721, R 0.538. Runner exported
+  ONNX itself: **(1, 5, 4116)** verified on VM and again on PC.
+- Artifacts in repo `training/new_model_fast/checkpoints/birdnet_v1/`
+  (best.pt 2.7 MB, best_448.onnx 5.1 MB, results.csv/json, args.yaml).
+  Commit `04eb50e`.
+- **Board trial #2** (sandbox :8890, `birdnet_v1_448.onnx`): fwd **692-800 ms**,
+  cycle **724-834 ms**, 8.3 fps steady, detections publishing. Production
+  restored (active, idle-gated).
+- Scoreboard (all @448):
+  | model | params | GFLOPs@448 | val mAP50@448 | fwd (board) | cycle |
+  |---|---|---|---|---|---|
+  | prod fine-tuned V8 | 3.0 M | 4.3 | 0.806 | ~875 | ~915 |
+  | scratch_v1 V8 | 3.0 M | 4.3 | 0.651 | 776-844 | 819-887 |
+  | **BirdNet v1** | **1.23 M** | **2.6** | **0.623** | **692-800** | **724-834** |
+- **Insight: the AM62 fwd is memory-bound, not FLOP-bound.** 40% fewer
+  FLOPs bought only ~10-15% time. Board speed levers in order of expected
+  impact: (1) INT8 quantization (attacks both MACs and bandwidth, never
+  attempted), (2) architecture with fewer/smaller activations (stride-2
+  earlier, fewer concat/elementwise), (3) accuracy: distillation from the
+  fine-tuned V8 (0.806 teacher) to close the 0.62→0.80 gap.
+- Sandbox unit's `-m` flag flipped to `birdnet_v1_448.onnx` during trial
+  and reverted to `best_448.onnx` after; scratch + birdnet onnx both stay
+  in `/home/root/birdcpp-scratch/`.
+
 ## 2026-11-16 — baseline DONE + board trial of scratch_v1 (agent: gentle-wizard, build)
 
 - **Baseline complete (205 ep, early stop, 0.86 h T4):** val@640 mAP50
@@ -36,11 +63,12 @@ session wrote it. Keep entries as terse facts with paths/numbers.
   the camera until idle-suspended).
 - User explicitly authorized stopping everything on the board for the
   trial; production was down ~3 min total across attempts and is back.
-- BirdNet v1 training launched (PID 18556): 250 ep @448 batch 32 amp=False,
-  ~18 s/ep. At ep ~125: val@448 mAP50 ~0.57-0.60 (from-scratch trajectory,
-  LR still decaying).
+- BirdNet v1 training launched right after (PID 18556): 250 ep @448 batch
+  32 amp=False, ~18 s/ep.
 
+---
 
+## 2026-11-16 — BirdNet v1 built + smoke-validated; sandbox staged (agent: gentle-wizard, build)
 
 - Custom-model skeleton committed: `training/new_model_fast/custom_model/`
   (`birdnet.py` ReLU modules + register(), `birdnet_v1.yaml` channel plan,
