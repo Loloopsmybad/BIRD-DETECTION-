@@ -1,0 +1,28 @@
+{
+  "weights": "/content/birdnet_runs/birdnet_v1/weights/best.pt",
+  "precision": 0.721,
+  "recall": 0.5375,
+  "mAP50": 0.623,
+  "mAP50-95": 0.3888,
+  "epochs_requested": 250,
+  "imgsz": 448,
+  "batch": 32,
+  "train_images": 760,
+  "val_images": 190,
+  "params_m": 1.233,
+  "gflops_at_640": 5.297,
+  "wall_hours": 0.59,
+  "onnx": "/content/birdnet_runs/birdnet_v1/weights/best.onnx",
+  "onnx_input": [
+    1,
+    3,
+    448,
+    448
+  ],
+  "onnx_output_shape": [
+    1,
+    5,
+    4116
+  ],
+  "onnx_output_ok": true
+}
