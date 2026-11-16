@@ -57,6 +57,11 @@ def autopad(k, p=None, d=1):
 class BConv(nn.Module):
     """conv-bn-ReLU drop-in for ultralytics Conv (which is conv-bn-SiLU)."""
 
+    # parse_model (ultralytics >= 8.4) reads Conv.default_act as process-wide
+    # state and may also do `block.cv1.act = Conv.default_act`. Expose ReLU so
+    # the patched Conv keeps reporting the activation we actually use.
+    default_act = nn.ReLU(inplace=True)
+
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1):
         super().__init__()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
@@ -121,6 +126,13 @@ class BirdSPPF(nn.Module):
         return self.cv2(torch.cat((x, y1, y2, y3), 1))
 
 
+def _make_detect_base():
+    """Import Detect lazily so the module can be imported without ultralytics."""
+    from ultralytics.nn.modules.head import Detect
+
+    return Detect
+
+
 class BirdDetect(_make_detect_base()):
     """Detect with slim branches sized for a 1-class detector.
 
@@ -132,8 +144,10 @@ class BirdDetect(_make_detect_base()):
     Everything else (DFL decode, anchors, sigmoid, export path) inherited.
     """
 
-    def __init__(self, nc=1, ch=()):
-        super().__init__(nc, ch)
+    def __init__(self, nc=1, reg_max=16, end2end=False, ch=()):
+        # match stock Detect(8.4.x) signature: parse_model extends head args
+        # with [reg_max, end2end, ch_list]
+        super().__init__(nc, reg_max, end2end, ch)
         c2 = 32  # box branch hidden
         c3 = 32  # cls branch hidden
         self.cv2 = nn.ModuleList(
@@ -149,14 +163,6 @@ class BirdDetect(_make_detect_base()):
         )
 
 
-def _make_detect_base():
-    """Import Detect lazily so the module can be imported without ultralytics."""
-    from ultralytics.nn.modules.head import Detect
-
-    return Detect
-
-
-# ---------------------------------------------------------------- register --
 def register():
     """Monkey-patch ultralytics.nn.tasks so standard yaml names resolve to
     our ReLU variants. Call once, BEFORE constructing the model."""
