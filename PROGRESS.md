@@ -5,7 +5,42 @@ session wrote it. Keep entries as terse facts with paths/numbers.
 
 ---
 
-## 2026-11-16 — BirdNet v1 built + smoke-validated; sandbox staged (agent: gentle-wizard, build)
+## 2026-11-16 — baseline DONE + board trial of scratch_v1 (agent: gentle-wizard, build)
+
+- **Baseline complete (205 ep, early stop, 0.86 h T4):** val@640 mAP50
+  **0.704**, mAP50-95 0.469, P 0.754, R 0.610. **val@448 (board-matching)
+  mAP50 0.651**, mAP50-95 0.416. So COCO pretraining was worth **+0.138
+  mAP50** on our data (0.842 vs 0.704 @640) — that's the phase-③
+  distillation gap to close.
+- Artifacts downloaded to
+  `training/new_model_fast/checkpoints/scratch_v1/` (best.pt 6.3 MB,
+  last.pt, results.csv/png/json, args.yaml) via the cloudflared tunnel.
+  Commit `bba5275`.
+- ONNX exported on PC (`tools/export_scratch_448.py`, onnxslim): **(1, 5,
+  4116)** verified with onnxruntime. scp'd to
+  `/home/root/birdcpp-scratch/best_448.onnx` (12.2 MB).
+- **Board trial (:8890 sandbox, model best_448.onnx):** steady-state fwd
+  **776-844 ms**, cycle **819-887 ms**, 7.7-8.9 fps, detections publishing
+  (det_pubs 114→307). Same architecture as production → same speed as
+  expected; the accuracy gap (0.651 vs 0.806) is what phases ②-④ must fix.
+- **Camera-ownership saga (learned the hard way):** the CSI camera is
+  exclusive. `camkit` (boot-enabled) auto-grabs the camera the moment
+  production releases it, and stopping camkit fires its unit's
+  `ExecStopPost: start birdboard` (legacy hand-back) which then
+  crash-loops (Restart=always) and wedges the CSI pipeline (EBUSY on
+  VIDIOC_S_CTRL even with zero fd holders). Order that works: stop camkit
+  → **stop birdboard LAST** → kill pumpers → trial → restart birdcpp.
+  One wedged state was only cleared by stopping every camera user.
+  Production verified LIVE again (fresh frames). **camkit left stopped**
+  (lab tool — `systemctl start camkit` re-enables, but it will fight for
+  the camera until idle-suspended).
+- User explicitly authorized stopping everything on the board for the
+  trial; production was down ~3 min total across attempts and is back.
+- BirdNet v1 training launched (PID 18556): 250 ep @448 batch 32 amp=False,
+  ~18 s/ep. At ep ~125: val@448 mAP50 ~0.57-0.60 (from-scratch trajectory,
+  LR still decaying).
+
+
 
 - Custom-model skeleton committed: `training/new_model_fast/custom_model/`
   (`birdnet.py` ReLU modules + register(), `birdnet_v1.yaml` channel plan,
